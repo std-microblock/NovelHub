@@ -683,13 +683,21 @@ class _RichUserContent extends StatelessWidget {
 }
 
 /// Assistant content rendered as streaming Markdown via
-/// [animated_streaming_markdown]. On each build, if the incoming [data] has
-/// grown by appending to the previous value we feed only the new suffix via
-/// `parser.append`; otherwise (edit / shrink / first mount) we `replace` the
-/// whole buffer. This keeps block layout stable as tokens stream in.
+/// [animated_streaming_markdown].
 ///
-/// Code blocks get a dark, readable background regardless of the bubble color
-/// (avoids the light-blue-bg / light-pink-text clash from the default theme).
+/// Standard streaming usage (per the package's chat example): keep ONE
+/// [MarkdownStreamParser] alive for the message's lifetime, feed each new
+/// text suffix via `parser.append(delta)`, and hand `result.blocks` to
+/// [AnimatedStreamingMarkdown]. The renderer keys blocks by a stable
+/// `_blockIdentity`, so already-visible blocks are reused (not re-revealed)
+/// across updates — only genuinely new blocks animate in.
+///
+/// `widget.data` is the fully-accumulated assistant text so far, not a single
+/// chunk, so we track the previously-applied length and append only the suffix.
+/// Token deltas arrive many times per frame; we coalesce them via a short
+/// throttle so we don't parse+set state per token.
+///
+/// Code blocks get a dark, readable background regardless of the bubble color.
 class _MarkdownContent extends StatefulWidget {
   final String data;
   final Color fgColor;
@@ -707,93 +715,104 @@ class _MarkdownContent extends StatefulWidget {
 }
 
 class _MarkdownContentState extends State<_MarkdownContent> {
-  // Settled (non-streaming) markdown render. Parsed once when the stream
-  // settles; never re-parsed on every delta. null = not yet rendered.
-  List<MarkdownRenderNode>? _blocks;
+  final MarkdownStreamParser _parser = MarkdownStreamParser();
+  List<MarkdownRenderNode> _blocks = const [];
+  bool _parserReady = false;
 
-  // Streaming preview: throttled plain-text render. Token deltas arrive many
-  // times per frame; rebuilding a full markdown widget (whose per-block
-  // reveal scheduler re-runs on every new block) on each delta is what caused
-  // flicker, "streams again" on settle, and jank. We show lightweight plain
-  // text while streaming and only hand off to the markdown renderer once.
-  String _preview = '';
-  Timer? _flushTimer;
-  bool _flushScheduled = false;
+  // Text already fed into the parser. We append only the suffix beyond this
+  // each update; if the new text doesn't extend it (shrank / edited in place)
+  // we `replace` the whole buffer (resets parser state).
+  String _applied = '';
 
-  static const _flushInterval = Duration(milliseconds: 50);
+  // Coalesce rapid token deltas: re-parse at most once per interval. The last
+  // delta within a window wins; the final settle flushes immediately.
+  Timer? _pumpTimer;
+  bool _pumpScheduled = false;
+  static const _pumpInterval = Duration(milliseconds: 40);
 
   @override
   void initState() {
     super.initState();
-    if (widget.streaming) {
-      _preview = widget.data;
-      _scheduleFlush();
-    } else {
-      _renderSettled(widget.data);
-    }
+    _parser.start().then((_) {
+      if (!mounted) return;
+      _parserReady = true;
+      _apply(widget.data);
+    });
   }
 
   @override
   void didUpdateWidget(covariant _MarkdownContent oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data == oldWidget.data &&
-        widget.streaming == oldWidget.streaming) {
-      return;
-    }
-    if (widget.streaming) {
-      _blocks = null; // streaming again -> drop settled render, use preview
-      _preview = widget.data;
-      _scheduleFlush();
-    } else {
-      // Settled: parse the final markdown once and render it.
-      _cancelFlush();
-      _renderSettled(widget.data);
-    }
+    if (widget.data == oldWidget.data) return;
+    if (!_parserReady) return;
+    // Streaming (or rapid updates): throttle. Settled (data stopped changing
+    // + not streaming) also goes through the same path; the throttle just
+    // defers by at most _pumpInterval, which is imperceptible on settle.
+    _schedulePump();
   }
 
-  void _scheduleFlush() {
-    if (_flushScheduled) return;
-    _flushScheduled = true;
-    _flushTimer = Timer(_flushInterval, () {
-      _flushScheduled = false;
-      if (mounted) setState(() {});
+  void _schedulePump() {
+    if (_pumpScheduled) return;
+    _pumpScheduled = true;
+    _pumpTimer = Timer(_pumpInterval, () {
+      _pumpScheduled = false;
+      if (!mounted) return;
+      _apply(widget.data);
     });
   }
 
-  void _cancelFlush() {
-    _flushTimer?.cancel();
-    _flushTimer = null;
-    _flushScheduled = false;
+  bool _applying = false;
+  bool _needsReapply = false;
+
+  Future<void> _apply(String data) async {
+    if (_applying) {
+      // A newer update arrived while a parse was in flight; re-apply the
+      // latest data once it resolves (avoids dropping the final delta and
+      // prevents two concurrent appends racing on the parser).
+      _needsReapply = true;
+      return;
+    }
+    _applying = true;
+    try {
+      await _applyOnce(data);
+    } finally {
+      _applying = false;
+    }
+    if (!mounted) return;
+    if (_needsReapply) {
+      _needsReapply = false;
+      _apply(widget.data);
+    }
   }
 
-  void _renderSettled(String data) {
-    final result = MarkdownSyncParser.parseMarkdown(data);
-    _blocks = result.blocks;
-    setState(() {});
+  Future<void> _applyOnce(String data) async {
+    if (data.startsWith(_applied) && data.length >= _applied.length) {
+      // Extends the previously-applied text → feed only the new suffix
+      // (incremental parse; existing blocks keep their identity).
+      final delta = data.substring(_applied.length);
+      if (delta.isEmpty) return;
+      final r = await _parser.append(delta);
+      if (!mounted) return;
+      _applied = data;
+      setState(() => _blocks = r.blocks);
+    } else {
+      // Shrank / non-append change → reset and reparse whole buffer.
+      final r = await _parser.replace(data);
+      if (!mounted) return;
+      _applied = data;
+      setState(() => _blocks = r.blocks);
+    }
   }
 
   @override
   void dispose() {
-    _cancelFlush();
+    _pumpTimer?.cancel();
+    _parser.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // Streaming -> plain-text preview (cheap, no parser/animation).
-    if (widget.streaming && _blocks == null) {
-      return SelectableText(
-        _preview.isEmpty && widget.data.isNotEmpty ? widget.data : _preview,
-        style: TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
-      );
-    }
-    final blocks = _blocks;
-    if (blocks == null) {
-      return SelectableText(
-        widget.data,
-        style: TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
-      );
-    }
     final brightness = widget.theme.brightness;
     final codeBg = brightness == Brightness.dark
         ? Colors.black.withValues(alpha: 0.35)
@@ -809,7 +828,7 @@ class _MarkdownContentState extends State<_MarkdownContent> {
       inlineCodeTextStyle: TextStyle(
         backgroundColor: codeBg,
         color: codeFg,
-        fontFamily: 'monospace',
+        fontFamily: "monospace",
         fontSize: 13,
         height: 1.4,
       ),
@@ -817,24 +836,27 @@ class _MarkdownContentState extends State<_MarkdownContent> {
       codeBlockBackgroundColor: codeBg,
       codeBlockTextStyle: TextStyle(
         color: codeFg,
-        fontFamily: 'monospace',
+        fontFamily: "monospace",
         fontSize: 13,
         height: 1.4,
       ),
       quoteBackgroundColor: widget.fgColor.withValues(alpha: 0.06),
       thematicBreakColor: widget.fgColor.withValues(alpha: 0.3),
     );
-    // Settled render: animation off (the reveal scheduler would replay on
-    // any later data change), selection on.
-    return AnimatedStreamingMarkdown(
-      blocks: blocks,
-      theme: theme,
-      enableSelection: true,
-      allowIncompleteInlineSyntax: true,
-      tokenStaggerDelay: Duration.zero,
-      tokenAnimationDuration: Duration.zero,
-      tokenCompaction: AnimatedMarkdownTokenCompaction.always,
-      showCodeBlockCopyButton: true,
+    // RepaintBoundary isolates the streaming markdown's per-frame repaints
+    // from the rest of the message list.
+    return RepaintBoundary(
+      child: AnimatedStreamingMarkdown(
+        blocks: _blocks,
+        theme: theme,
+        enableSelection: true,
+        allowIncompleteInlineSyntax: true,
+        // Keep the token reveal snappy so long messages don't queue up
+        // animation work faster than it can drain.
+        tokenStaggerDelay: const Duration(milliseconds: 30),
+        tokenAnimationDuration: const Duration(milliseconds: 120),
+        showCodeBlockCopyButton: true,
+      ),
     );
   }
 }
