@@ -138,10 +138,13 @@ class AgentLoop {
         cancelToken: cancelToken,
         onChunk: (chunk) {
           final contentDelta = chunk.contentDelta;
+          final reasoningDelta = chunk.reasoningDelta;
           final hasContent =
               contentDelta != null && contentDelta.isNotEmpty;
+          final hasReasoning =
+              reasoningDelta != null && reasoningDelta.isNotEmpty;
           final hasTools = chunk.toolCallDeltas.isNotEmpty;
-          if (!hasContent && !hasTools) return;
+          if (!hasContent && !hasReasoning && !hasTools) return;
           if (hasTools) {
             chunk.toolCallDeltas.forEach((index, delta) {
               final b = tcBuilders.putIfAbsent(index, _ToolCallBuilder.new);
@@ -169,7 +172,9 @@ class AgentLoop {
             content: hasContent
                 ? assistant.content + contentDelta
                 : assistant.content,
-            reasoningContent: assistant.reasoningContent,
+            reasoningContent: hasReasoning
+                ? assistant.reasoningContent + reasoningDelta
+                : assistant.reasoningContent,
             toolCalls: newToolCalls,
             turnId: userMessage.turnId,
             createdAt: assistant.createdAt,
