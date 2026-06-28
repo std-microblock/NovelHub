@@ -167,21 +167,31 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
 
   Widget _chapterSwitch(EditorState editor) {
     final chapters = editor.novel.chapters;
-    return DropdownButton<String>(
-      value: editor.chapter.id,
-      underline: const SizedBox(),
-      items: [
-        for (final c in chapters)
-          DropdownMenuItem(
-            value: c.id,
-            child: Text('${c.title} · ${c.paragraphs.length}段'),
-          ),
-      ],
-      onChanged: (id) {
-        if (id != null) {
-          ref.read(editorStateProvider.notifier).selectChapter(id);
-        }
-      },
+    return ConstrainedBox(
+      // Bound the dropdown width so a long chapter title can't blow up the
+      // AppBar layout — it ellipsizes instead.
+      constraints: const BoxConstraints(maxWidth: 220),
+      child: DropdownButton<String>(
+        value: editor.chapter.id,
+        underline: const SizedBox(),
+        isExpanded: true,
+        items: [
+          for (final c in chapters)
+            DropdownMenuItem(
+              value: c.id,
+              child: Text(
+                '${c.title} · ${c.paragraphs.length}段',
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+        ],
+        onChanged: (id) {
+          if (id != null) {
+            ref.read(editorStateProvider.notifier).selectChapter(id);
+          }
+        },
+      ),
     );
   }
 
