@@ -222,14 +222,27 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                         streaming: streaming,
                         streamingActive: streamingActive,
                       ),
-                      if (_showJumpButton)
-                        Positioned(
-                          right: 12,
-                          bottom: 8,
-                          child: _JumpToBottomButton(
-                            onTap: _jumpToBottom,
+                      // Jump-to-bottom button: always in the tree, toggled via
+                      // opacity rather than conditionally rendered, so showing/
+                      // hiding it doesn't change the Stack's child structure
+                      // (which re-laid-out the ListView and made the content
+                      // "jolt" each time the button appeared).
+                      Positioned(
+                        right: 12,
+                        bottom: 8,
+                        child: IgnorePointer(
+                          ignoring: !_showJumpButton,
+                          child: AnimatedOpacity(
+                            duration:
+                                const Duration(milliseconds: 150),
+                            curve: Curves.easeOut,
+                            opacity: _showJumpButton ? 1 : 0,
+                            child: _JumpToBottomButton(
+                              onTap: _jumpToBottom,
+                            ),
                           ),
                         ),
+                      ),
                     ],
                   ),
           ),
