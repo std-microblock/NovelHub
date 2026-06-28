@@ -36,7 +36,7 @@ void main() {
       ];
       final doc = NovelDoc(novel);
       doc.editParagraphs(
-          chapterId: 'c', start: 12, end: 13, newText: 'xxx\nyyy', messageId: 'm1');
+          chapterId: 'c', start: 12, end: 13, newText: 'xxx\n\nyyy', messageId: 'm1');
       final paras = doc.chapterById('c')!.paragraphs;
       expect(paras.length, 13);
       expect(paras[11].text, 'xxx');
@@ -55,10 +55,20 @@ void main() {
     test('edit range can shrink/grow paragraph count', () {
       final doc = _docWith(3);
       doc.editParagraphs(
-          chapterId: 'c1', start: 2, end: 3, newText: 'a\nb\nc', messageId: 'm1');
+          chapterId: 'c1', start: 2, end: 3, newText: 'a\n\nb\n\nc', messageId: 'm1');
       final paras = doc.chapterById('c1')!.paragraphs;
       expect(paras.length, 4);
       expect(paras.map((p) => p.text).toList(), ['line1', 'a', 'b', 'c']);
+    });
+
+    test('single newline is a soft wrap, not a paragraph break', () {
+      // `\n` alone stays inside one paragraph; only `\n\n` splits.
+      final doc = _docWith(2);
+      doc.editParagraphs(
+          chapterId: 'c1', start: 1, end: 1, newText: 'line one\nstill one', messageId: 'm1');
+      final paras = doc.chapterById('c1')!.paragraphs;
+      expect(paras.length, 2);
+      expect(paras[0].text, 'line one\nstill one');
     });
 
     test('out-of-range throws', () {
@@ -108,7 +118,7 @@ void main() {
     test('insert at 1 prepends', () {
       final doc = _docWith(2);
       doc.insertParagraphs(
-          chapterId: 'c1', index: 1, newText: 'head1\nhead2', messageId: 'm1');
+          chapterId: 'c1', index: 1, newText: 'head1\n\nhead2', messageId: 'm1');
       expect(doc.chapterById('c1')!.paragraphs.map((p) => p.text).toList(),
           ['head1', 'head2', 'line1', 'line2']);
     });

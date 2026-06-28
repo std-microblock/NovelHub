@@ -57,7 +57,7 @@ void main() {
   test('revertTo with insertions removes inserted paragraphs', () {
     final doc = _docWith(1);
     final timeline = Timeline(doc);
-    doc.insertParagraphs(chapterId: 'c1', index: 1, newText: 'x\ny', messageId: 'm1');
+    doc.insertParagraphs(chapterId: 'c1', index: 1, newText: 'x\n\ny', messageId: 'm1');
     expect(doc.chapterById('c1')!.paragraphs.length, 3);
     timeline.revertTo('m1', includeMessage: true);
     expect(doc.chapterById('c1')!.paragraphs.length, 1);

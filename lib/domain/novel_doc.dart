@@ -439,8 +439,11 @@ class NovelDoc {
     }
   }
 
+  /// Split text into paragraphs on blank-line boundaries (`\n\n`), matching
+  /// the editor's `setChapterBody` convention: a single `\n` is a soft wrap
+  /// kept within a paragraph, only `\n\n` starts a new paragraph.
   List<Paragraph> _splitToParagraphs(String text) {
-    final lines = text.split('\n');
-    return lines.map((l) => Paragraph.create(l)).toList();
+    final blocks = text.split('\n\n');
+    return blocks.map((l) => Paragraph.create(l)).toList();
   }
 }

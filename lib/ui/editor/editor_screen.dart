@@ -132,7 +132,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
       ],
       onChanged: (id) {
         if (id != null) {
-          ref.read(currentNovelProvider.notifier).selectChapter(id);
+          ref.read(editorStateProvider.notifier).selectChapter(id);
         }
       },
     );

@@ -125,6 +125,11 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   void _maybeRebuild() {
     final novel = _ref.read(currentNovelProvider).valueOrNull;
     if (novel == null) return;
+    // Source of truth for the selected chapter is currentNovelProvider's
+    // currentChapterId (set by the top-bar dropdown). Mirror it locally so
+    // _currentChapter stays in sync on chapter switches.
+    _chapterId = _ref.read(currentNovelProvider.notifier).currentChapterId ??
+        novel.chapters.firstOrNull?.id;
     final chapter = _currentChapter(novel);
     if (novel.id == _novelId) {
       // Same novel (covers both persist re-emits and chapter switches):
@@ -135,7 +140,6 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
       return;
     }
     _novelId = novel.id;
-    _chapterId = novel.chapters.firstOrNull?.id;
     final novelDoc = NovelDoc(novel);
     // The agent conversation is per-novel: load the novel-level conversation
     // (chapterId == ''), or create a fresh one.
@@ -167,10 +171,11 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     return Conversation.create(novelId: novel.id, chapterId: '');
   }
 
-  /// Public hook for when the chapter changes via the top bar dropdown.
-  /// This only swaps the displayed/target chapter — the agent conversation
-  /// and undo timeline are per-novel and are NOT rebuilt.
-  void onChapterChanged(String chapterId) {
+  /// Select a chapter for display / as the default tool target. This does NOT
+  /// rebuild the agent conversation or undo timeline (those are per-novel):
+  /// it updates the current-chapter source of truth and refreshes the editor
+  /// state's chapter ref.
+  void selectChapter(String chapterId) {
     _ref.read(currentNovelProvider.notifier).selectChapter(chapterId);
     _chapterId = chapterId;
     final novel = _ref.read(currentNovelProvider).valueOrNull;

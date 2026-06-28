@@ -113,7 +113,7 @@ class ToolRegistry {
           );
           return ev;
         }, summary: (cid) {
-          final lines = (args['new_text'] as String).split('\n').length;
+          final lines = (args['new_text'] as String).split('\n\n').length;
           return '插入 $lines 段于 ${ctx.novelDoc.chapterById(cid)?.title} 第 ${args['index']} 段前';
         });
 
