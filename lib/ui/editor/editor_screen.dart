@@ -59,7 +59,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         ],
       ),
       drawer: const NovelDrawer(),
-      body: LayoutBuilder(
+      // Pad the bottom so content clears the edge-to-edge system navigation
+      // bar (gesture handle); otherwise the agent pane renders behind it.
+      body: SafeArea(
+        top: false,
+        child: LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth > 900;
           if (wide) {
@@ -114,6 +118,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
             ],
           );
         },
+        ),
       ),
     );
   }
