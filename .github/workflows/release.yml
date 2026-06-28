@@ -1,0 +1,125 @@
+name: Nightly Release
+
+# Builds Android + Windows artifacts on every push to master and updates
+# a rolling `nightly` release (deleted + recreated, assets replaced).
+# Release notes are auto-filled from the commit log since the last nightly.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: android
+            artifact: build/app/outputs/flutter-apk/app-release.apk
+            asset_name: novelhub-android.apk
+          - os: windows-latest
+            target: windows
+            artifact: build/windows/x64/runner/Release
+            asset_name: novelhub-windows.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Generate codegen (build_runner)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build Android (debug-signed APK)
+        if: matrix.target == 'android'
+        run: flutter build apk --release
+
+      - name: Build Windows
+        if: matrix.target == 'windows'
+        run: flutter build windows --release
+
+      - name: Zip Windows release folder
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.artifact }}/*" -DestinationPath "${{ matrix.asset_name }}" -Force
+
+      - name: Stage Android artifact
+        if: matrix.target == 'android'
+        shell: bash
+        run: cp "${{ matrix.artifact }}" "${{ matrix.asset_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          DATE=$(date -u +'%Y-%m-%d')
+          {
+            echo "## Nightly build ($DATE)"
+            echo
+            echo "Commit: ${GITHUB_SHA::7}"
+            echo
+            echo "### Changes since last nightly"
+          } > NOTES.md
+          # Commits since the nightly tag (or all if the tag doesn't exist yet).
+          git log --pretty=format:"- %s (%h)" nightly..HEAD >> NOTES.md 2>/dev/null || \
+            git log --pretty=format:"- %s (%h)" -n 50 >> NOTES.md
+          {
+            echo
+            echo
+            echo "_Automated build from push to master. Artifacts are debug-signed._"
+          } >> NOTES.md
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Delete previous nightly release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete nightly --yes --cleanup-tag || true
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create nightly \
+            --title "Nightly ${{ steps.notes.outputs.date }}" \
+            --notes-file NOTES.md \
+            --target master \
+            artifacts/*
