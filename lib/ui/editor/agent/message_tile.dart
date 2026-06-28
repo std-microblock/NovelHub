@@ -707,121 +707,93 @@ class _MarkdownContent extends StatefulWidget {
 }
 
 class _MarkdownContentState extends State<_MarkdownContent> {
-  final MarkdownStreamParser _parser = MarkdownStreamParser();
-  List<MarkdownRenderNode> _blocks = const [];
-  bool _started = false;
+  // Settled (non-streaming) markdown render. Parsed once when the stream
+  // settles; never re-parsed on every delta. null = not yet rendered.
+  List<MarkdownRenderNode>? _blocks;
 
-  // Streaming throttle: token deltas arrive many times per frame. Re-parsing
-  // (the stub parser re-runs over the whole rope) + setState on every delta
-  // is the main cause of jank for long assistant messages. We coalesce deltas
-  // and re-parse at most once per ~60ms, flushing immediately when the
-  // stream settles (data stops changing) so the final frame is current.
-  String _pending = '';
-  String? _pendingPrev;
+  // Streaming preview: throttled plain-text render. Token deltas arrive many
+  // times per frame; rebuilding a full markdown widget (whose per-block
+  // reveal scheduler re-runs on every new block) on each delta is what caused
+  // flicker, "streams again" on settle, and jank. We show lightweight plain
+  // text while streaming and only hand off to the markdown renderer once.
+  String _preview = '';
   Timer? _flushTimer;
   bool _flushScheduled = false;
-  bool _streaming = false;
 
-  static const _flushInterval = Duration(milliseconds: 60);
+  static const _flushInterval = Duration(milliseconds: 50);
 
   @override
   void initState() {
     super.initState();
-    _streaming = widget.streaming;
-    _parser.start().then((_) {
-      if (!mounted) return;
-      _apply(widget.data, null);
-    });
+    if (widget.streaming) {
+      _preview = widget.data;
+      _scheduleFlush();
+    } else {
+      _renderSettled(widget.data);
+    }
   }
 
   @override
   void didUpdateWidget(covariant _MarkdownContent oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final wasStreaming = _streaming;
-    _streaming = widget.streaming;
-    // Stream just settled → flush any pending delta so the final frame is
-    // current, then let the next build re-enable animation/selection on the
-    // settled text. If nothing was pending, a setState-free rebuild still
-    // re-reads `_streaming=false` because the parent rebuilt us.
-    if (wasStreaming && !widget.streaming) {
-      if (_flushScheduled) {
-        _flushTimer?.cancel();
-        _flushPending();
-      } else {
-        setState(() {});
-      }
+    if (widget.data == oldWidget.data &&
+        widget.streaming == oldWidget.streaming) {
       return;
     }
-    if (widget.data != oldWidget.data) {
-      if (widget.streaming) {
-        _schedule(widget.data, oldWidget.data);
-      } else {
-        // Not streaming: apply immediately (final settle / non-stream mount).
-        _cancelSchedule();
-        _apply(widget.data, oldWidget.data);
-      }
+    if (widget.streaming) {
+      _blocks = null; // streaming again -> drop settled render, use preview
+      _preview = widget.data;
+      _scheduleFlush();
+    } else {
+      // Settled: parse the final markdown once and render it.
+      _cancelFlush();
+      _renderSettled(widget.data);
     }
   }
 
-  void _schedule(String data, String? prev) {
-    _pending = data;
-    _pendingPrev = prev;
-    if (_flushScheduled) return; // timer already armed; just keep the latest
+  void _scheduleFlush() {
+    if (_flushScheduled) return;
     _flushScheduled = true;
-    _flushTimer = Timer(_flushInterval, _flushPending);
+    _flushTimer = Timer(_flushInterval, () {
+      _flushScheduled = false;
+      if (mounted) setState(() {});
+    });
   }
 
-  void _cancelSchedule() {
+  void _cancelFlush() {
     _flushTimer?.cancel();
     _flushTimer = null;
     _flushScheduled = false;
-    _pending = '';
-    _pendingPrev = null;
   }
 
-  Future<void> _flushPending() async {
-    _flushScheduled = false;
-    final data = _pending;
-    final prev = _pendingPrev;
-    _pending = '';
-    _pendingPrev = null;
-    if (data.isEmpty && prev == null) return;
-    await _apply(data, prev);
-  }
-
-  Future<void> _apply(String data, String? prev) async {
-    if (!_started) {
-      // First parse — always a replace.
-      _started = true;
-      final r = await _parser.replace(data);
-      if (!mounted) return;
-      setState(() => _blocks = r.blocks);
-      return;
-    }
-    // Streaming: if the new text extends the old, append only the suffix so
-    // the parser keeps its incremental state and the layout stays stable.
-    if (prev != null && prev.isNotEmpty && data.startsWith(prev)) {
-      final delta = data.substring(prev.length);
-      if (delta.isEmpty) return;
-      final r = await _parser.append(delta);
-      if (!mounted) return;
-      setState(() => _blocks = r.blocks);
-    } else {
-      final r = await _parser.replace(data);
-      if (!mounted) return;
-      setState(() => _blocks = r.blocks);
-    }
+  void _renderSettled(String data) {
+    final result = MarkdownSyncParser.parseMarkdown(data);
+    _blocks = result.blocks;
+    setState(() {});
   }
 
   @override
   void dispose() {
-    _cancelSchedule();
-    _parser.dispose();
+    _cancelFlush();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Streaming -> plain-text preview (cheap, no parser/animation).
+    if (widget.streaming && _blocks == null) {
+      return SelectableText(
+        _preview.isEmpty && widget.data.isNotEmpty ? widget.data : _preview,
+        style: TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
+      );
+    }
+    final blocks = _blocks;
+    if (blocks == null) {
+      return SelectableText(
+        widget.data,
+        style: TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
+      );
+    }
     final brightness = widget.theme.brightness;
     final codeBg = brightness == Brightness.dark
         ? Colors.black.withValues(alpha: 0.35)
@@ -852,20 +824,16 @@ class _MarkdownContentState extends State<_MarkdownContent> {
       quoteBackgroundColor: widget.fgColor.withValues(alpha: 0.06),
       thematicBreakColor: widget.fgColor.withValues(alpha: 0.3),
     );
+    // Settled render: animation off (the reveal scheduler would replay on
+    // any later data change), selection on.
     return AnimatedStreamingMarkdown(
-      blocks: _blocks,
+      blocks: blocks,
       theme: theme,
-      enableSelection: !_streaming,
+      enableSelection: true,
       allowIncompleteInlineSyntax: true,
-      // Disable per-token reveal animation while streaming: it rebuilds every
-      // token widget on each delta and is the dominant cost for long text.
-      // Re-enable selection + a short fade once the stream settles.
-      tokenStaggerDelay: _streaming ? Duration.zero : const Duration(milliseconds: 80),
-      tokenAnimationDuration:
-          _streaming ? Duration.zero : const Duration(milliseconds: 160),
-      tokenCompaction: _streaming
-          ? AnimatedMarkdownTokenCompaction.always
-          : AnimatedMarkdownTokenCompaction.automatic,
+      tokenStaggerDelay: Duration.zero,
+      tokenAnimationDuration: Duration.zero,
+      tokenCompaction: AnimatedMarkdownTokenCompaction.always,
       showCodeBlockCopyButton: true,
     );
   }
