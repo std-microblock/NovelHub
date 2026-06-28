@@ -114,6 +114,7 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
         }
         final s = _novel.characterSettings[i];
         return Card(
+          key: ValueKey(s.id),
           child: Padding(
             padding: const EdgeInsets.all(8),
             child: Column(
@@ -122,6 +123,7 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
                   children: [
                     Expanded(
                       child: TextFormField(
+                        key: ValueKey('set-name-${s.id}'),
                         initialValue: s.name,
                         decoration: const InputDecoration(labelText: '名称'),
                         onChanged: (v) => s.name = v,
@@ -129,12 +131,16 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.delete_outline),
-                      onPressed: () => setState(
-                          () => _novel.characterSettings.removeAt(i)),
+                      onPressed: () {
+                        setState(
+                            () => _novel.characterSettings.removeAt(i));
+                        ref.read(novelListProvider.notifier).save(_novel);
+                      },
                     ),
                   ],
                 ),
                 TextFormField(
+                  key: ValueKey('set-desc-${s.id}'),
                   initialValue: s.description,
                   maxLines: 3,
                   decoration: const InputDecoration(labelText: '描述'),
@@ -165,10 +171,12 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
         }
         final r = _novel.textRequirements[i];
         return Card(
+          key: ValueKey(r.id),
           child: Row(
             children: [
               Expanded(
                 child: TextFormField(
+                  key: ValueKey('req-${r.id}'),
                   initialValue: r.text,
                   decoration: const InputDecoration(
                       border: InputBorder.none, contentPadding: EdgeInsets.all(12)),
@@ -177,8 +185,12 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
               ),
               IconButton(
                 icon: const Icon(Icons.delete_outline),
-                onPressed: () =>
-                    setState(() => _novel.textRequirements.removeAt(i)),
+                onPressed: () {
+                  setState(() => _novel.textRequirements.removeAt(i));
+                  // Persist immediately so the deletion survives a re-open
+                  // even if the user never taps the save FAB.
+                  ref.read(novelListProvider.notifier).save(_novel);
+                },
               ),
             ],
           ),
