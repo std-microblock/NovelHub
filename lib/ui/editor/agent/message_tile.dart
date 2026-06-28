@@ -27,9 +27,13 @@ class MessageTile extends StatefulWidget {
   State<MessageTile> createState() => _MessageTileState();
 }
 
-class _MessageTileState extends State<MessageTile> {
+class _MessageTileState extends State<MessageTile>
+    with AutomaticKeepAliveClientMixin {
   bool _cotExpanded = false;
   bool _cotUserToggled = false;
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void didUpdateWidget(covariant MessageTile oldWidget) {
@@ -45,6 +49,7 @@ class _MessageTileState extends State<MessageTile> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final m = widget.message;
     final isUser = m.role == MessageRole.user;
     final isTool = m.role == MessageRole.tool;
@@ -851,10 +856,15 @@ class _MarkdownContentState extends State<_MarkdownContent> {
         theme: theme,
         enableSelection: true,
         allowIncompleteInlineSyntax: true,
-        // Keep the token reveal snappy so long messages don't queue up
-        // animation work faster than it can drain.
-        tokenStaggerDelay: const Duration(milliseconds: 30),
-        tokenAnimationDuration: const Duration(milliseconds: 120),
+        // Animation fully off. With any non-zero token animation, every
+        // throttled flush hands the widget a fresh blocks list and the
+        // per-block reveal scheduler re-evaluates → flicker while streaming,
+        // and a flash/jump when a block scrolls out of and back into the
+        // viewport. Duration.zero + always-compact makes rendering purely
+        // static: blocks appear immediately, no fade, no rescheduling.
+        tokenStaggerDelay: Duration.zero,
+        tokenAnimationDuration: Duration.zero,
+        tokenCompaction: AnimatedMarkdownTokenCompaction.always,
         showCodeBlockCopyButton: true,
       ),
     );
