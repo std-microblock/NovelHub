@@ -48,60 +48,53 @@ class _MessageTileState extends State<MessageTile> {
     final bubbleColor =
         isUser ? scheme.primary : scheme.surfaceContainerHigh;
     final fgColor = isUser ? scheme.onPrimary : scheme.onSurface;
-    final align =
-        isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: align,
-        children: [
-          // Tool calls emitted by this assistant message are rendered merged
-          // with their results by the turn cluster (_ToolCallBlock), not here.
-          // Bubble.
-          Container(
-            constraints: const BoxConstraints(maxWidth: 560),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: bubbleColor,
-              borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(16),
-                topRight: const Radius.circular(16),
-                bottomLeft: Radius.circular(isUser ? 16 : 4),
-                bottomRight: Radius.circular(isUser ? 4 : 16),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // CoT (collapsible, collapsed by default).
-                if (m.reasoningContent.isNotEmpty)
-                  _CollapsibleCot(
-                    content: m.reasoningContent,
-                    expanded: _cotExpanded,
-                    onToggle: () =>
-                        setState(() => _cotExpanded = !_cotExpanded),
-                    color: fgColor,
-                  ),
-                if (m.content.isNotEmpty || !widget.streaming)
-                  isUser
-                      ? _RichUserContent(content: m.content, fgColor: fgColor)
-                      : _MarkdownContent(
-                          data: m.content,
-                          fgColor: fgColor,
-                          theme: Theme.of(context),
-                        )
-                else
-                  const _TypingDots(),
-                if (widget.streaming && m.content.isNotEmpty)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 4),
-                    child: _TypingDots(),
-                  ),
-              ],
+      child: Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 560),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: bubbleColor,
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(16),
+              topRight: const Radius.circular(16),
+              bottomLeft: Radius.circular(isUser ? 16 : 4),
+              bottomRight: Radius.circular(isUser ? 4 : 16),
             ),
           ),
-        ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // CoT (collapsible, collapsed by default).
+              if (m.reasoningContent.isNotEmpty)
+                _CollapsibleCot(
+                  content: m.reasoningContent,
+                  expanded: _cotExpanded,
+                  onToggle: () =>
+                      setState(() => _cotExpanded = !_cotExpanded),
+                  color: fgColor,
+                ),
+              if (m.content.isNotEmpty || !widget.streaming)
+                isUser
+                    ? _RichUserContent(content: m.content, fgColor: fgColor)
+                    : _MarkdownContent(
+                        data: m.content,
+                        fgColor: fgColor,
+                        theme: Theme.of(context),
+                      )
+              else
+                const _TypingDots(),
+              if (widget.streaming && m.content.isNotEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: _TypingDots(),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

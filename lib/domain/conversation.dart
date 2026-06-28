@@ -58,6 +58,12 @@ class Message {
   /// For role==tool: the tool name (optional, for display).
   final String? toolName;
 
+  /// Agent-facing context attached to a user message (e.g. the currently
+  /// selected paragraphs at send time). Persisted for cross-session
+  /// consistency, but NOT rendered in the UI bubble. Sent to the LLM as an
+  /// appended block after the message's plain-text content.
+  final String messageContext;
+
   /// True if this assistant message is a DeepSeek prefix-continuation seed.
   final bool prefix;
 
@@ -79,6 +85,7 @@ class Message {
     List<ToolCall>? toolCalls,
     this.toolCallId,
     this.toolName,
+    this.messageContext = '',
     this.prefix = false,
     required this.turnId,
     required this.createdAt,
@@ -92,6 +99,7 @@ class Message {
         toolCalls: toolCalls.map((e) => e.copy()).toList(),
         toolCallId: toolCallId,
         toolName: toolName,
+        messageContext: messageContext,
         prefix: prefix,
         turnId: turnId,
         createdAt: createdAt,
@@ -105,6 +113,7 @@ class Message {
         'toolCalls': toolCalls.map((e) => e.toJson()).toList(),
         'toolCallId': toolCallId,
         'toolName': toolName,
+        'messageContext': messageContext,
         'prefix': prefix,
         'turnId': turnId,
         'createdAt': createdAt,
@@ -120,6 +129,7 @@ class Message {
             .toList(),
         toolCallId: json['toolCallId'] as String?,
         toolName: json['toolName'] as String?,
+        messageContext: (json['messageContext'] as String?) ?? '',
         prefix: (json['prefix'] as bool?) ?? false,
         turnId: (json['turnId'] as String?) ?? json['id'] as String,
         createdAt: (json['createdAt'] as num?)?.toInt() ?? 0,
@@ -128,15 +138,17 @@ class Message {
   static Message user(
     String text, {
     int? createdAt,
-    String? turnId,
+    String turnId = '',
+    String messageContext = '',
   }) {
     final id = _uuid.v4();
     return Message(
         id: id,
         role: MessageRole.user,
         content: text,
-        turnId: turnId ?? id,
-        createdAt: createdAt ?? 0);
+        turnId: turnId.isEmpty ? id : turnId,
+        createdAt: createdAt ?? 0,
+        messageContext: messageContext);
   }
 }
 

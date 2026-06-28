@@ -1,23 +1,24 @@
 /// System prompt assembly: base instructions + novel settings + character /
-/// prop settings + current chapter full text (with paragraph numbers) +
-/// text requirements. These are prepended to every agent turn by default.
+/// prop settings + text requirements. Prepended to every agent turn.
+///
+/// NOTE: the current chapter's full text is intentionally NOT injected here.
+/// The agent session is decoupled from the chapter selection: chapter choice
+/// only affects which paragraphs are attached as context when the user sends a
+/// message (see Message.messageContext). Use the chapter tools
+/// (get_chapter_full_text / get_chapter_list) to read chapter content.
 library;
 
 import '../domain/entities.dart';
-import '../domain/paragraph_doc.dart';
 
 class SystemPromptBuilder {
   const SystemPromptBuilder();
 
   String build({
     required Novel novel,
-    required ParagraphDoc doc,
-    required String chapterTitle,
   }) {
     final parts = <String>[];
 
     parts.add(_base);
-    parts.add(_formatChapter(chapterTitle, doc.getFullText()));
     if (novel.textSettings.trim().isNotEmpty) {
       parts.add('【文本设定】\n${novel.textSettings.trim()}');
     }
@@ -40,21 +41,26 @@ class SystemPromptBuilder {
     return parts.join('\n\n');
   }
 
-  static const String _base = '''你是一个小说写作 Agent。你通过调用工具直接修改当前章节的段落文档。
+  static const String _base = '''你是一个小说写作 Agent。你通过调用工具直接修改小说的章节文档与章节结构。
 
 段落以 1 为起始编号。工具的 range 是闭区间，例如 edit_range(start=12, end=13, new_text="xxx\\nyyy") 会把第 12、13 段替换为 "xxx" 与 "yyy" 两段。
 
+本会话贯穿整本书，与当前编辑器选中的章节无关。系统不会预注入任何章节正文——你需要时请用 get_chapter_full_text(chapter?) 或 get_chapter_list() 主动获取。用户消息末尾可能附带"选中段落"上下文（来自用户当时选中的章节），这是该消息的上下文，仅当轮可用。
+
+段落工具（edit_range / delete_range / insert_at / get_chapter_full_text）支持可选的 chapter 参数：章节 id 或 1-based 序号；省略时默认当前编辑器选中章节。
+
 可用工具：
-- get_chapter_full_text：获取当前章节全文（带段落号）。
-- edit_range(start, end, new_text)：把 start..end 段替换为 new_text（按换行拆分为多段）。
-- delete_range(start, end)：删除 start..end 段。
-- insert_at(index, new_text)：在第 index 段前插入 new_text（index = 段数+1 时追加到末尾）。
+- get_chapter_full_text(chapter?)：获取章节全文（带段落号），默认当前章节。
+- edit_range(start, end, new_text, chapter?)：把 start..end 段替换为 new_text（按换行拆分为多段）。
+- delete_range(start, end, chapter?)：删除 start..end 段。
+- insert_at(index, new_text, chapter?)：在第 index 段前插入 new_text（index = 段数+1 时追加到末尾）。
+- get_chapter_list()：获取全部章节列表（序号 / id / 标题 / 段落数）。
+- add_chapter(title?, position?)：新增一章（position 为 1-based 插入位置，省略=末尾）。
+- rename_chapter(chapter, title)：重命名章节。
+- delete_chapter(chapter)：删除章节（至少保留一章）。
+- move_chapter(chapter, to_position)：调整章节顺序。
 - add_setting / delete_setting / update_setting：增删改人物/道具设定。
 - add_text_requirement / delete_text_requirement / update_text_requirement：增删改文本要求。
 
-请先用 get_chapter_full_text 了解当前内容，再按用户意图修改。修改后用一句话向用户说明你做了什么。''';
-
-  String _formatChapter(String title, String fullText) {
-    return '【当前章节：$title】\n$fullText';
-  }
+所有章节变更（含跨章节段落写入与章节增删改排序）都是可逆的，用户可按消息撤回。请先用 get_chapter_list / get_chapter_full_text 了解现状，再按用户意图修改。修改后用一句话向用户说明你做了什么。''';
 }

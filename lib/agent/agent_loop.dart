@@ -11,7 +11,7 @@ import '../data/llm/llm_models.dart';
 import '../data/llm/streaming_retry.dart';
 import '../domain/conversation.dart';
 import '../domain/entities.dart';
-import '../domain/paragraph_doc.dart';
+import '../domain/novel_doc.dart';
 import '../domain/rich_text.dart';
 import 'system_prompt.dart';
 import 'tool_registry.dart';
@@ -63,7 +63,8 @@ class AgentLoop {
   /// and the turn ends (no further rounds).
   Future<TurnSnapshot> run({
     required Novel novel,
-    required ParagraphDoc doc,
+    required NovelDoc novelDoc,
+    required String chapterId,
     required String chapterTitle,
     required List<Message> history,
     required Message userMessage,
@@ -71,12 +72,12 @@ class AgentLoop {
     required TurnUpdate onTurnUpdate,
     CancelToken? cancelToken,
   }) async {
-    final system = promptBuilder.build(
-        novel: novel, doc: doc, chapterTitle: chapterTitle);
+    final system = promptBuilder.build(novel: novel);
 
     final toolCtxBase = () => ToolContext(
           novel: novel,
-          doc: doc,
+          novelDoc: novelDoc,
+          currentChapterId: chapterId,
           chapterTitle: chapterTitle,
           messageId: userMessage.id,
           now: now,
@@ -86,9 +87,10 @@ class AgentLoop {
       LlmMessage(role: MessageRole.system, content: system),
       ...history.map(_toLlm),
       // Convert rich-text content (inline @@$...$@@ tokens) to the
-      // model-facing plain text before sending to the LLM.
+      // model-facing plain text, then append any agent-facing message
+      // context (e.g. selected paragraphs) before sending to the LLM.
       LlmMessage(
-          role: MessageRole.user, content: toAgentText(userMessage.content)),
+          role: MessageRole.user, content: _userToLlmText(userMessage)),
     ];
 
     var round = 0;
@@ -220,14 +222,24 @@ class AgentLoop {
         toolCallId: m.toolCallId,
       );
     }
-    // User messages may carry rich-text tokens; convert to plain text.
-    final content = m.role == MessageRole.user ? toAgentText(m.content) : m.content;
+    // User messages may carry rich-text tokens; convert to plain text, then
+    // append any agent-facing message context (persisted for consistency).
+    final content = m.role == MessageRole.user ? _userToLlmText(m) : m.content;
     return LlmMessage(
       role: m.role,
       content: content,
       toolCalls: m.toolCalls,
       reasoningContent: m.reasoningContent,
     );
+  }
+
+  /// Plain-text view of a user message for the LLM: rich-text tokens expanded
+  /// via [toAgentText], with any agent-facing [Message.messageContext]
+  /// (e.g. selected paragraphs) appended as a trailing block.
+  String _userToLlmText(Message m) {
+    final base = toAgentText(m.content);
+    if (m.messageContext.isEmpty) return base;
+    return '$base\n\n${m.messageContext}';
   }
 
   String _newAssistantId() => _uuid.v4();

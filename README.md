@@ -19,7 +19,7 @@ flutter test                # 运行单测（段落工具 / 时间线 / agent lo
 ## 架构
 
 - **domain/** 纯模型：`entities`（Novel/Chapter/Paragraph/Setting/TextRequirement）、
-  `conversation`（Message/ToolCall/Conversation）、`paragraph_doc`（段落 range 操作 + 逆操作）、
+  `conversation`（Message/ToolCall/Conversation）、`novel_doc`（全章节段落 + 章节结构 range 操作 + 逆操作）、
   `timeline`（事件溯源 revertTo）。
 - **data/llm/** LLM 抽象：`LlmClient` 接口 + 三 provider
   （OpenAI 兼容 / OpenAI 流式 / DeepSeek 前缀续写 beta），`streaming_retry`（自动 + 手动续写），

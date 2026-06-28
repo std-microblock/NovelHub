@@ -7,19 +7,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/llm/streaming_retry.dart' show CancelToken;
 import '../domain/conversation.dart';
 import '../domain/entities.dart';
-import '../domain/paragraph_doc.dart';
+import '../domain/novel_doc.dart';
 import '../domain/rich_text.dart';
 import '../domain/timeline.dart';
 import 'providers.dart';
 
 enum EditorMode { select, edit }
 
-/// Immutable snapshot of editor UI state. The ParagraphDoc is mutable but
+/// Immutable snapshot of editor UI state. The NovelDoc is mutable but
 /// referenced by identity; consumers rebuild on [bump] changes.
 class EditorState {
   final Novel novel;
   final Chapter chapter;
-  final ParagraphDoc doc;
+  final NovelDoc novelDoc;
   final Timeline timeline;
   final Conversation conversation;
   final EditorMode mode;
@@ -39,7 +39,7 @@ class EditorState {
   EditorState({
     required this.novel,
     required this.chapter,
-    required this.doc,
+    required this.novelDoc,
     required this.timeline,
     required this.conversation,
     this.mode = EditorMode.select,
@@ -58,7 +58,7 @@ class EditorState {
   EditorState copyWith({
     Novel? novel,
     Chapter? chapter,
-    ParagraphDoc? doc,
+    NovelDoc? novelDoc,
     Timeline? timeline,
     Conversation? conversation,
     EditorMode? mode,
@@ -72,7 +72,7 @@ class EditorState {
       EditorState(
         novel: novel ?? this.novel,
         chapter: chapter ?? this.chapter,
-        doc: doc ?? this.doc,
+        novelDoc: novelDoc ?? this.novelDoc,
         timeline: timeline ?? this.timeline,
         conversation: conversation ?? this.conversation,
         mode: mode ?? this.mode,
@@ -103,8 +103,8 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
       : super(EditorState(
           novel: _placeholderNovel(),
           chapter: _placeholderNovel().chapters.first,
-          doc: ParagraphDoc(_placeholderNovel().chapters.first),
-          timeline: Timeline(ParagraphDoc(_placeholderNovel().chapters.first)),
+          novelDoc: NovelDoc(_placeholderNovel()),
+          timeline: Timeline(NovelDoc(_placeholderNovel())),
           conversation: Conversation(
               id: 'init', novelId: '', chapterId: ''),
         )) {
@@ -115,55 +115,71 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
 
   static Novel _placeholderNovel() => Novel.create(title: '');
 
-  /// Rebuild doc + conversation ONLY when the novel id or chapter id actually
-  /// changes. Persisting a novel swaps its object identity in
-  /// novelListProvider → currentNovelProvider re-emits, but the id is the
-  /// same, so we must NOT throw away the live conversation/editor state.
+  /// Rebuild doc + conversation ONLY when the novel id actually changes.
+  /// Persisting a novel swaps its object identity in novelListProvider →
+  /// currentNovelProvider re-emits, but the id is the same, so we must NOT
+  /// throw away the live conversation/editor state. The agent conversation is
+  /// per-novel (NOT per-chapter), so switching chapters must NOT rebuild the
+  /// doc/timeline/conversation — it only swaps which chapter the editor
+  /// displays and which chapter tools target by default.
   void _maybeRebuild() {
     final novel = _ref.read(currentNovelProvider).valueOrNull;
     if (novel == null) return;
-    final chapterId =
-        _ref.read(currentNovelProvider.notifier).currentChapterId ??
-            novel.chapters.first.id;
-    final chapter = novel.chapters.firstWhere(
-      (c) => c.id == chapterId,
-      orElse: () => novel.chapters.first,
-    );
-    if (novel.id == _novelId && chapterId == _chapterId) {
-      // Same novel+chapter: keep editor state, just refresh the novel ref so
-      // the editor sees any externally-loaded changes (e.g. settings).
+    final chapter = _currentChapter(novel);
+    if (novel.id == _novelId) {
+      // Same novel (covers both persist re-emits and chapter switches):
+      // keep the conversation + NovelDoc + timeline (which hold undo history),
+      // just refresh the novel/chapter refs. NovelDoc holds this same novel
+      // object by reference, so its events survive.
       state = state.copyWith(novel: novel, chapter: chapter);
       return;
     }
     _novelId = novel.id;
-    _chapterId = chapterId;
-    final doc = ParagraphDoc(chapter);
-    // Load any persisted conversation for this chapter.
-    final conv = _loadConversation(novel, chapter.id);
+    _chapterId = novel.chapters.firstOrNull?.id;
+    final novelDoc = NovelDoc(novel);
+    // The agent conversation is per-novel: load the novel-level conversation
+    // (chapterId == ''), or create a fresh one.
+    final conv = _loadNovelConversation(novel);
     state = EditorState(
       novel: novel,
-      chapter: chapter,
-      doc: doc,
-      timeline: Timeline(doc),
+      chapter: _currentChapter(novel),
+      novelDoc: novelDoc,
+      timeline: Timeline(novelDoc),
       conversation: conv,
     );
   }
 
-  /// Load the persisted conversation for a chapter (from the novel's
-  /// conversationsJson), or create a fresh empty one.
-  Conversation _loadConversation(Novel novel, String chapterId) {
+  Chapter _currentChapter(Novel novel) {
+    final id = _chapterId ?? novel.chapters.firstOrNull?.id;
+    return novel.chapters.firstWhere(
+      (c) => c.id == id,
+      orElse: () => novel.chapters.first,
+    );
+  }
+
+  /// Load the per-novel conversation (the one whose chapterId is empty),
+  /// or create a fresh empty one.
+  Conversation _loadNovelConversation(Novel novel) {
     for (final raw in novel.conversationsJson) {
       final c = Conversation.fromJson(raw);
-      if (c.chapterId == chapterId) return c;
+      if ((c.chapterId.isEmpty)) return c;
     }
-    return Conversation.create(novelId: novel.id, chapterId: chapterId);
+    return Conversation.create(novelId: novel.id, chapterId: '');
   }
 
   /// Public hook for when the chapter changes via the top bar dropdown.
+  /// This only swaps the displayed/target chapter — the agent conversation
+  /// and undo timeline are per-novel and are NOT rebuilt.
   void onChapterChanged(String chapterId) {
     _ref.read(currentNovelProvider.notifier).selectChapter(chapterId);
-    _chapterId = null; // force rebuild to pick up new chapter id
-    _maybeRebuild();
+    _chapterId = chapterId;
+    final novel = _ref.read(currentNovelProvider).valueOrNull;
+    if (novel == null) return;
+    final chapter = novel.chapters.firstWhere(
+      (c) => c.id == chapterId,
+      orElse: () => novel.chapters.first,
+    );
+    state = state.copyWith(novel: novel, chapter: chapter);
   }
 
   // --- mode / selection ---
@@ -244,14 +260,8 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   /// selection afterward (the composer inserts the returned token into the
   /// rich-text editor, which becomes the source of truth for the draft).
   RichToken? buildRefTokenForSelection({bool keepSelection = false}) {
-    if (state.selectedParagraphIds.isEmpty) return null;
-    final paras = state.chapter.paragraphs;
-    final selected = paras
-        .asMap()
-        .entries
-        .where((e) => state.selectedParagraphIds.contains(e.value.id))
-        .toList();
-    if (selected.isEmpty) return null;
+    final selected = _selectedParagraphEntries();
+    if (selected == null) return null;
     final startNo = selected.first.key + 1;
     final endNo = selected.last.key + 1;
     final body =
@@ -265,6 +275,34 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     );
     if (!keepSelection) clearSelection();
     return token;
+  }
+
+  /// The currently-selected paragraphs as ordered (index, paragraph) entries
+  /// in the current chapter, or null if nothing is selected. Read-only.
+  List<MapEntry<int, Paragraph>>? _selectedParagraphEntries() {
+    if (state.selectedParagraphIds.isEmpty) return null;
+    final selected = state.chapter.paragraphs
+        .asMap()
+        .entries
+        .where((e) => state.selectedParagraphIds.contains(e.value.id))
+        .toList();
+    return selected.isEmpty ? null : selected;
+  }
+
+  /// Build the agent-facing message context for an outgoing user message:
+  /// the currently-selected paragraphs (with their chapter + 1-based numbers).
+  /// Returns '' if nothing is selected. Clears the selection afterward.
+  /// This context is persisted on the message and sent to the LLM, but NOT
+  /// rendered in the UI bubble.
+  String _buildSelectionContext() {
+    final selected = _selectedParagraphEntries();
+    if (selected == null) return '';
+    final startNo = selected.first.key + 1;
+    final endNo = selected.last.key + 1;
+    final body =
+        selected.map((e) => '${e.key + 1} ${e.value.text}').join('\n');
+    clearSelection();
+    return '【选中段落（章节：${state.chapter.title}，第 $startNo~$endNo 段）】\n$body';
   }
 
   /// Insert a reference badge for the currently-selected paragraphs into the
@@ -341,12 +379,17 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     if (content.trim().isEmpty) return;
 
     final turnId = 'turn_${_tick()}';
+    // Attach the currently-selected paragraphs as agent-facing context for
+    // this message. Persisted on the message (consistency across sessions)
+    // but not rendered in the UI.
+    final messageContext = _buildSelectionContext();
     // Store the rich content (with tokens) on the user message; the agent
-    // gets the converted plain text via toAgentText at run time.
+    // gets the converted plain text + messageContext via _userToLlmText.
     final userMsg = Message.user(
       content,
       createdAt: _tick(),
       turnId: turnId,
+      messageContext: messageContext,
     );
     state.conversation.messages.add(userMsg);
     _cancelToken = CancelToken();
@@ -361,7 +404,8 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
       final loop = _ref.read(agentLoopProvider);
       await loop.run(
         novel: state.novel,
-        doc: state.doc,
+        novelDoc: state.novelDoc,
+        chapterId: state.chapter.id,
         chapterTitle: state.chapter.title,
         history: state.conversation.messages
             .where((m) => m.id != userMsg.id)
@@ -482,11 +526,13 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     loadMessageForEdit(userMsg.id);
   }
 
-  /// Clear the conversation context but keep the document as-is.
+  /// Clear the conversation context but keep the document as-is. The agent
+  /// conversation is per-novel, so the new empty conversation is also per-novel
+  /// (chapterId == '').
   void clearContext() {
     state = state.copyWith(
       conversation: Conversation.create(
-          novelId: state.novel.id, chapterId: state.chapter.id),
+          novelId: state.novel.id, chapterId: ''),
       streamingMessages: const [],
       agentRunning: false,
       lastError: null,

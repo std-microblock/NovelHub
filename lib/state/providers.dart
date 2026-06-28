@@ -222,8 +222,8 @@ String _uuid() => DateTime.now().microsecondsSinceEpoch.toRadixString(16);
 final currentNovelIdProvider = StateProvider<String?>((ref) => null);
 
 /// The currently active Novel (mutable, with its own state notifier so edits
-/// propagate). The notifier holds the live ParagraphDoc for the current
-/// chapter.
+/// propagate). The notifier holds the live NovelDoc for the current
+/// novel/chapter.
 final currentNovelProvider =
     StateNotifierProvider<CurrentNovelNotifier, AsyncValue<Novel?>>((ref) {
   return CurrentNovelNotifier(ref);
@@ -271,7 +271,7 @@ class CurrentNovelNotifier extends StateNotifier<AsyncValue<Novel?>> {
 
 // --- Editor / document / conversation ---
 
-/// The mutable ParagraphDoc + timeline + conversation for the current
+/// The mutable NovelDoc + timeline + conversation for the current
 /// novel/chapter. Rebuilt when novel or chapter changes.
 final editorStateProvider =
     StateNotifierProvider<EditorStateNotifier, EditorState>((ref) {
