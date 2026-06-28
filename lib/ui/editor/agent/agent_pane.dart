@@ -43,18 +43,26 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   /// Track whether the user is at the bottom. When the user scrolls away from
   /// the bottom (manually, or via drag), auto-scroll is suspended; tapping the
   /// floating "jump to bottom" button re-enables it.
+  ///
+  /// Uses hysteresis (two thresholds) so the jump-button / auto-scroll flag
+  /// doesn't thrash on/off when the user idles near the boundary — that
+  /// thrash was the source of the "flicker when scrolling up" bug.
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
     final distance = pos.maxScrollExtent - pos.pixels;
-    final atBottom = distance < 48;
+    final bool atBottom = _autoScroll ? distance < 96 : distance < 32;
+    final bool showButton = !_autoScroll;
+    bool changed = false;
     if (atBottom != _autoScroll) {
-      setState(() => _autoScroll = atBottom);
+      _autoScroll = atBottom;
+      _showJumpButton = !atBottom;
+      changed = true;
+    } else if (showButton != _showJumpButton) {
+      _showJumpButton = showButton;
+      changed = true;
     }
-    final shouldShow = !_autoScroll;
-    if (shouldShow != _showJumpButton) {
-      setState(() => _showJumpButton = shouldShow);
-    }
+    if (changed) setState(() {});
   }
 
   void _scrollToBottom() {
@@ -91,6 +99,12 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
       return;
     }
     ref.read(editorStateProvider.notifier).send('');
+    // Scroll the just-sent user bubble into view before streaming starts.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
   }
 
   @override
@@ -104,7 +118,10 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
         editor.agentRunning &&
         streaming.last.role == MessageRole.assistant;
 
-    if (streaming.isNotEmpty || messages.isNotEmpty) _scrollToBottom();
+    // Only auto-scroll while the agent is actively streaming new content.
+    // Doing this on every rebuild (incl. typing in the composer, which also
+    // rebuilds this pane) caused the list to jump on every keystroke.
+    if (streamingActive) _scrollToBottom();
 
     final scheme = Theme.of(context).colorScheme;
 
