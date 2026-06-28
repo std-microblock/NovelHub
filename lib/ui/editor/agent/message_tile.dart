@@ -587,6 +587,11 @@ class _CollapsibleCotState extends State<_CollapsibleCot>
     super.initState();
     _ctrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 180));
+    // Sync the initial value to the expanded flag so a CoT that mounts already
+    // expanded (e.g. streaming) is visible from the first frame — otherwise it
+    // starts at height 0 and only the didUpdateWidget path would forward it,
+    // which never fires on first mount.
+    _ctrl.value = widget.expanded ? 1.0 : 0.0;
     _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOutCubic);
   }
 
