@@ -366,14 +366,81 @@ class _TextToolSpec {
   /// While streaming, the args JSON is incomplete. `new_text` is usually the
   /// last field, so a common partial shape is `{"start":12,"end":13,"new_text":"...`.
   /// Pull out everything after the `"new_text":"` opener (best-effort; the
-  /// closing quote may be missing).
+  /// closing quote may be missing), then unescape the JSON string escapes
+  /// (e.g. `\n` → newline, `\"` → `"`) so the prose renders with real line
+  /// breaks instead of literal backslash-n.
   static String _extractPartialNewText(String raw) {
     final markers = ['"new_text":"', '"new_text": "'];
+    String? tail;
     for (final m in markers) {
       final i = raw.indexOf(m);
-      if (i >= 0) return raw.substring(i + m.length);
+      if (i >= 0) {
+        tail = raw.substring(i + m.length);
+        break;
+      }
     }
-    return '';
+    if (tail == null) return '';
+    // Drop a trailing closing quote if the value happened to finish streaming.
+    if (tail.endsWith('"')) tail = tail.substring(0, tail.length - 1);
+    return _unescapeJsonString(tail);
+  }
+
+  /// Best-effort JSON string-escape reversal. We can't `jsonDecode` a partial
+  /// value, so handle the common escapes manually. Any unknown escape is left
+  /// untouched.
+  static String _unescapeJsonString(String s) {
+    if (!s.contains('\\')) return s;
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      final c = s[i];
+      if (c != '\\') {
+        buf.write(c);
+        continue;
+      }
+      final next = ++i < s.length ? s[i] : '';
+      switch (next) {
+        case 'n':
+          buf.write('\n');
+          break;
+        case 't':
+          buf.write('\t');
+          break;
+        case 'r':
+          buf.write('\r');
+          break;
+        case '"':
+          buf.write('"');
+          break;
+        case '\\':
+          buf.write('\\');
+          break;
+        case '/':
+          buf.write('/');
+          break;
+        case 'b':
+          buf.write('\b');
+          break;
+        case 'f':
+          buf.write('\f');
+          break;
+        case 'u':
+          if (i + 4 < s.length) {
+            final hex = s.substring(i + 1, i + 5);
+            final code = int.tryParse(hex, radix: 16);
+            if (code != null) {
+              buf.write(String.fromCharCode(code));
+              i += 4;
+              break;
+            }
+          }
+          buf.write('\\u');
+          break;
+        default:
+          buf.write('\\');
+          buf.write(next);
+      }
+    }
+    return buf.toString();
   }
 }
 
@@ -400,9 +467,6 @@ class _TextToolBody extends StatelessWidget {
 
     final proseStyle =
         TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurface);
-    final prose = spec.newText.isEmpty
-        ? TextSpan(text: '（无内容）', style: proseStyle)
-        : _lineBreakPreservingSpan(spec.newText, proseStyle);
 
     return Container(
       width: double.infinity,
@@ -423,29 +487,15 @@ class _TextToolBody extends StatelessWidget {
                       color: scheme.onTertiaryContainer,
                       fontFamily: 'monospace')),
             ),
-          // RichText renders `\n` spans as real line breaks (plain Text would
-          // fold them into spaces).
-          Text.rich(prose, style: proseStyle),
+          // Plain Text renders `\n` as real line breaks; spec.newText is
+          // already JSON-unescaped so escapes became control characters.
+          Text(
+            spec.newText.isEmpty ? '（无内容）' : spec.newText,
+            style: proseStyle,
+          ),
         ],
       ),
     );
-  }
-
-  /// Build a [TextSpan] that preserves all `\n` as hard line breaks. A plain
-  /// TextSpan keeps them as soft newlines only inside RichText; splitting on
-  /// `\n` and re-joining with `\n` inside a Text.rich context yields true
-  /// line wrapping for each segment.
-  static TextSpan _lineBreakPreservingSpan(String text, TextStyle style) {
-    if (!text.contains('\n')) return TextSpan(text: text, style: style);
-    final lines = text.split('\n');
-    final spans = <InlineSpan>[];
-    for (var i = 0; i < lines.length; i++) {
-      if (i > 0) spans.add(const TextSpan(text: '\n'));
-      if (lines[i].isNotEmpty) {
-        spans.add(TextSpan(text: lines[i], style: style));
-      }
-    }
-    return TextSpan(children: spans, style: style);
   }
 }
 
