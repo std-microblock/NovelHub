@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:animated_streaming_markdown/animated_streaming_markdown.dart';
+import 'dart:async';
 import 'dart:convert';
 
 import '../../../domain/conversation.dart';
@@ -28,6 +29,19 @@ class MessageTile extends StatefulWidget {
 
 class _MessageTileState extends State<MessageTile> {
   bool _cotExpanded = false;
+  bool _cotUserToggled = false;
+
+  @override
+  void didUpdateWidget(covariant MessageTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Auto-expand CoT while it streams in (so the user sees reasoning arrive),
+    // unless the user has already toggled it manually — then leave it alone.
+    if (!_cotUserToggled && widget.streaming &&
+        widget.message.reasoningContent.isNotEmpty &&
+        !_cotExpanded) {
+      _cotExpanded = true;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -71,8 +85,10 @@ class _MessageTileState extends State<MessageTile> {
                 _CollapsibleCot(
                   content: m.reasoningContent,
                   expanded: _cotExpanded,
-                  onToggle: () =>
-                      setState(() => _cotExpanded = !_cotExpanded),
+                  onToggle: () => setState(() {
+                    _cotUserToggled = true;
+                    _cotExpanded = !_cotExpanded;
+                  }),
                   color: fgColor,
                 ),
               if (m.content.isNotEmpty || !widget.streaming)
@@ -82,6 +98,7 @@ class _MessageTileState extends State<MessageTile> {
                         data: m.content,
                         fgColor: fgColor,
                         theme: Theme.of(context),
+                        streaming: widget.streaming,
                       )
               else
                 const _TypingDots(),
@@ -128,6 +145,10 @@ class ToolCallBlock extends StatefulWidget {
 class _ToolCallBlockState extends State<ToolCallBlock>
     with SingleTickerProviderStateMixin {
   bool _expanded = false;
+  // Did the user manually toggle? If so, stop auto-expanding on every delta —
+  // otherwise streaming rebuilds would immediately re-expand what the user
+  // just collapsed.
+  bool _userToggled = false;
   late final AnimationController _ctrl;
   late final Animation<double> _anim;
 
@@ -145,8 +166,10 @@ class _ToolCallBlockState extends State<ToolCallBlock>
   @override
   void didUpdateWidget(covariant ToolCallBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Auto-expand while streaming so the user sees args stream in live.
-    if (widget.streaming && !_expanded) {
+    // Auto-expand while streaming so the user sees args stream in live — but
+    // only until the user has manually interacted; after that respect their
+    // choice for the rest of the stream.
+    if (!_userToggled && widget.streaming && !_expanded) {
       _expanded = true;
       _ctrl.forward();
     } else if (!widget.streaming && oldWidget.streaming && _expanded) {
@@ -163,6 +186,7 @@ class _ToolCallBlockState extends State<ToolCallBlock>
   }
 
   void _toggle() {
+    _userToggled = true;
     setState(() => _expanded = !_expanded);
     if (_expanded) {
       _ctrl.forward();
@@ -670,10 +694,12 @@ class _MarkdownContent extends StatefulWidget {
   final String data;
   final Color fgColor;
   final ThemeData theme;
+  final bool streaming;
   const _MarkdownContent({
     required this.data,
     required this.fgColor,
     required this.theme,
+    this.streaming = false,
   });
 
   @override
@@ -685,9 +711,23 @@ class _MarkdownContentState extends State<_MarkdownContent> {
   List<MarkdownRenderNode> _blocks = const [];
   bool _started = false;
 
+  // Streaming throttle: token deltas arrive many times per frame. Re-parsing
+  // (the stub parser re-runs over the whole rope) + setState on every delta
+  // is the main cause of jank for long assistant messages. We coalesce deltas
+  // and re-parse at most once per ~60ms, flushing immediately when the
+  // stream settles (data stops changing) so the final frame is current.
+  String _pending = '';
+  String? _pendingPrev;
+  Timer? _flushTimer;
+  bool _flushScheduled = false;
+  bool _streaming = false;
+
+  static const _flushInterval = Duration(milliseconds: 60);
+
   @override
   void initState() {
     super.initState();
+    _streaming = widget.streaming;
     _parser.start().then((_) {
       if (!mounted) return;
       _apply(widget.data, null);
@@ -697,9 +737,56 @@ class _MarkdownContentState extends State<_MarkdownContent> {
   @override
   void didUpdateWidget(covariant _MarkdownContent oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data != oldWidget.data) {
-      _apply(widget.data, oldWidget.data);
+    final wasStreaming = _streaming;
+    _streaming = widget.streaming;
+    // Stream just settled → flush any pending delta so the final frame is
+    // current, then let the next build re-enable animation/selection on the
+    // settled text. If nothing was pending, a setState-free rebuild still
+    // re-reads `_streaming=false` because the parent rebuilt us.
+    if (wasStreaming && !widget.streaming) {
+      if (_flushScheduled) {
+        _flushTimer?.cancel();
+        _flushPending();
+      } else {
+        setState(() {});
+      }
+      return;
     }
+    if (widget.data != oldWidget.data) {
+      if (widget.streaming) {
+        _schedule(widget.data, oldWidget.data);
+      } else {
+        // Not streaming: apply immediately (final settle / non-stream mount).
+        _cancelSchedule();
+        _apply(widget.data, oldWidget.data);
+      }
+    }
+  }
+
+  void _schedule(String data, String? prev) {
+    _pending = data;
+    _pendingPrev = prev;
+    if (_flushScheduled) return; // timer already armed; just keep the latest
+    _flushScheduled = true;
+    _flushTimer = Timer(_flushInterval, _flushPending);
+  }
+
+  void _cancelSchedule() {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _flushScheduled = false;
+    _pending = '';
+    _pendingPrev = null;
+  }
+
+  Future<void> _flushPending() async {
+    _flushScheduled = false;
+    final data = _pending;
+    final prev = _pendingPrev;
+    _pending = '';
+    _pendingPrev = null;
+    if (data.isEmpty && prev == null) return;
+    await _apply(data, prev);
   }
 
   Future<void> _apply(String data, String? prev) async {
@@ -728,6 +815,7 @@ class _MarkdownContentState extends State<_MarkdownContent> {
 
   @override
   void dispose() {
+    _cancelSchedule();
     _parser.dispose();
     super.dispose();
   }
@@ -767,10 +855,17 @@ class _MarkdownContentState extends State<_MarkdownContent> {
     return AnimatedStreamingMarkdown(
       blocks: _blocks,
       theme: theme,
-      enableSelection: true,
+      enableSelection: !_streaming,
       allowIncompleteInlineSyntax: true,
-      tokenStaggerDelay: const Duration(milliseconds: 120),
-      tokenAnimationDuration: const Duration(milliseconds: 200),
+      // Disable per-token reveal animation while streaming: it rebuilds every
+      // token widget on each delta and is the dominant cost for long text.
+      // Re-enable selection + a short fade once the stream settles.
+      tokenStaggerDelay: _streaming ? Duration.zero : const Duration(milliseconds: 80),
+      tokenAnimationDuration:
+          _streaming ? Duration.zero : const Duration(milliseconds: 160),
+      tokenCompaction: _streaming
+          ? AnimatedMarkdownTokenCompaction.always
+          : AnimatedMarkdownTokenCompaction.automatic,
       showCodeBlockCopyButton: true,
     );
   }
