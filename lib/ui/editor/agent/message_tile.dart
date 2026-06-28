@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:animated_streaming_markdown/animated_streaming_markdown.dart';
 import 'dart:convert';
 
 import '../../../domain/conversation.dart';
@@ -593,10 +593,15 @@ class _RichUserContent extends StatelessWidget {
   }
 }
 
-/// Assistant content rendered as Markdown. Code blocks get a dark,
-/// readable background regardless of the bubble color (avoids the
-/// light-blue-bg / light-pink-text clash from the default theme).
-class _MarkdownContent extends StatelessWidget {
+/// Assistant content rendered as streaming Markdown via
+/// [animated_streaming_markdown]. On each build, if the incoming [data] has
+/// grown by appending to the previous value we feed only the new suffix via
+/// `parser.append`; otherwise (edit / shrink / first mount) we `replace` the
+/// whole buffer. This keeps block layout stable as tokens stream in.
+///
+/// Code blocks get a dark, readable background regardless of the bubble color
+/// (avoids the light-blue-bg / light-pink-text clash from the default theme).
+class _MarkdownContent extends StatefulWidget {
   final String data;
   final Color fgColor;
   final ThemeData theme;
@@ -607,38 +612,101 @@ class _MarkdownContent extends StatelessWidget {
   });
 
   @override
+  State<_MarkdownContent> createState() => _MarkdownContentState();
+}
+
+class _MarkdownContentState extends State<_MarkdownContent> {
+  final MarkdownStreamParser _parser = MarkdownStreamParser();
+  List<MarkdownRenderNode> _blocks = const [];
+  bool _started = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _parser.start().then((_) {
+      if (!mounted) return;
+      _apply(widget.data, null);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _MarkdownContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.data != oldWidget.data) {
+      _apply(widget.data, oldWidget.data);
+    }
+  }
+
+  Future<void> _apply(String data, String? prev) async {
+    if (!_started) {
+      // First parse — always a replace.
+      _started = true;
+      final r = await _parser.replace(data);
+      if (!mounted) return;
+      setState(() => _blocks = r.blocks);
+      return;
+    }
+    // Streaming: if the new text extends the old, append only the suffix so
+    // the parser keeps its incremental state and the layout stays stable.
+    if (prev != null && prev.isNotEmpty && data.startsWith(prev)) {
+      final delta = data.substring(prev.length);
+      if (delta.isEmpty) return;
+      final r = await _parser.append(delta);
+      if (!mounted) return;
+      setState(() => _blocks = r.blocks);
+    } else {
+      final r = await _parser.replace(data);
+      if (!mounted) return;
+      setState(() => _blocks = r.blocks);
+    }
+  }
+
+  @override
+  void dispose() {
+    _parser.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final codeBg = theme.brightness == Brightness.dark
+    final brightness = widget.theme.brightness;
+    final codeBg = brightness == Brightness.dark
         ? Colors.black.withValues(alpha: 0.35)
         : Colors.black.withValues(alpha: 0.06);
-    final codeFg = theme.brightness == Brightness.dark
+    final codeFg = brightness == Brightness.dark
         ? Colors.green.shade200
         : const Color(0xFF8E2DE2);
-    final codeStyle = TextStyle(
-      backgroundColor: codeBg,
-      color: codeFg,
-      fontFamily: 'monospace',
-      fontSize: 13,
-      height: 1.4,
-    );
-    final style = MarkdownStyleSheet.fromTheme(theme).copyWith(
-      p: TextStyle(color: fgColor, height: 1.5, fontSize: 14),
-      code: codeStyle,
-      codeblockDecoration: BoxDecoration(
-        color: codeBg,
-        borderRadius: BorderRadius.circular(6),
+    final theme = StreamingMarkdownThemeData(
+      blockSpacing: 8,
+      paragraphTextStyle:
+          TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
+      linkTextStyle: TextStyle(color: widget.theme.colorScheme.primary),
+      inlineCodeTextStyle: TextStyle(
+        backgroundColor: codeBg,
+        color: codeFg,
+        fontFamily: 'monospace',
+        fontSize: 13,
+        height: 1.4,
       ),
-      blockquoteDecoration: BoxDecoration(
-        color: fgColor.withValues(alpha: 0.06),
-        border: Border(
-            left: BorderSide(color: fgColor.withValues(alpha: 0.3), width: 2)),
+      inlineCodeBackgroundColor: codeBg,
+      codeBlockBackgroundColor: codeBg,
+      codeBlockTextStyle: TextStyle(
+        color: codeFg,
+        fontFamily: 'monospace',
+        fontSize: 13,
+        height: 1.4,
       ),
-      a: TextStyle(color: theme.colorScheme.primary),
+      quoteBackgroundColor: widget.fgColor.withValues(alpha: 0.06),
+      thematicBreakColor: widget.fgColor.withValues(alpha: 0.3),
     );
-    return MarkdownBody(
-      data: data,
-      selectable: true,
-      styleSheet: style,
+    return AnimatedStreamingMarkdown(
+      blocks: _blocks,
+      theme: theme,
+      enableSelection: true,
+      allowIncompleteInlineSyntax: true,
+      tokenStaggerDelay: const Duration(milliseconds: 120),
+      tokenAnimationDuration: const Duration(milliseconds: 200),
+      showCodeBlockCopyButton: true,
     );
   }
 }
