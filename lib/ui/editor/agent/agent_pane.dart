@@ -44,6 +44,11 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   }
 
   void _send() {
+    final editor = ref.read(editorStateProvider);
+    if (editor.agentRunning) {
+      ref.read(editorStateProvider.notifier).stop();
+      return;
+    }
     ref.read(editorStateProvider.notifier).send('');
   }
 
@@ -294,22 +299,37 @@ class _ComposerState extends ConsumerState<_Composer> {
   }
 
   void _onChanged() {
+    // Suppress the listener-driven report while we are programmatically
+    // applying an external value (in didUpdateWidget) — otherwise the
+    // controller's notifyListeners would write back to the provider during
+    // the widget build and throw "modified a provider while building".
+    if (_suppressNotify) return;
     widget.onChanged(_ctrl.toRichText());
   }
+
+  bool _suppressNotify = false;
 
   @override
   void didUpdateWidget(covariant _Composer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Sync the external draft into the controller when they diverge. This now
-    // fires regardless of focus, so that clearing the draft on send (state
-    // sets draftContent='') empties the field even while it held focus.
+    // Sync the external draft into the controller when they diverge — e.g.
+    // the state cleared draftContent='' on send, or loaded a message for edit.
+    // Deferred to a post-frame callback so that writing the controller value
+    // (which fires notifyListeners) does not happen synchronously inside a
+    // build pass, which would re-enter the provider and crash.
     if (widget.content != _ctrl.toRichText()) {
       final offset = _ctrl.selection.baseOffset;
-      _ctrl.setRichText(widget.content);
-      // Preserve caret near where it was if still valid, else end.
-      final len = _ctrl.text.length;
-      final pos = offset.clamp(0, len).toInt();
-      _ctrl.selection = TextSelection.collapsed(offset: pos);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        // Re-check: the user may have typed in the meantime.
+        if (widget.content == _ctrl.toRichText()) return;
+        _suppressNotify = true;
+        _ctrl.setRichText(widget.content);
+        final len = _ctrl.text.length;
+        final pos = offset.clamp(0, len).toInt();
+        _ctrl.selection = TextSelection.collapsed(offset: pos);
+        _suppressNotify = false;
+      });
     }
   }
 
@@ -346,8 +366,7 @@ class _ComposerState extends ConsumerState<_Composer> {
     final scheme = Theme.of(context).colorScheme;
     final providers = ref.watch(providerConfigListProvider).valueOrNull ?? [];
     final activeId = ref.watch(activeProviderIdProvider).valueOrNull;
-    final active = providers.firstWhere((p) => p.id == activeId,
-        orElse: providers.isEmpty ? null : () => providers.first);
+    final active = ref.watch(activeProviderConfigProvider);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 14),
@@ -357,7 +376,7 @@ class _ComposerState extends ConsumerState<_Composer> {
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: scheme.outlineVariant, width: 0.8),
         ),
-        padding: const EdgeInsets.fromLTRB(8, 6, 6, 4),
+        padding: const EdgeInsets.fromLTRB(10, 8, 8, 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -371,13 +390,13 @@ class _ComposerState extends ConsumerState<_Composer> {
               decoration: InputDecoration(
                 isCollapsed: true,
                 contentPadding:
-                    const EdgeInsets.symmetric(vertical: 4),
+                    const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
                 hintText: widget.editing ? '编辑消息…' : '给 AI 发消息…',
                 hintStyle: TextStyle(color: scheme.onSurfaceVariant),
                 border: InputBorder.none,
               ),
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: 4),
             Row(
               children: [
                 _ModelSwitcher(
@@ -669,24 +688,25 @@ class _SendButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.primary,
-      shape: const CircleBorder(),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: running ? null : onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: running
-              ? SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: scheme.onPrimary,
-                  ),
-                )
-              : Icon(Icons.arrow_upward, size: 18, color: scheme.onPrimary),
+    // While running, the button becomes a stop affordance (still tappable so
+    // the user can abort the in-progress turn); otherwise it sends.
+    final color = running ? scheme.error : scheme.primary;
+    return Tooltip(
+      message: running ? '停止生成' : '发送',
+      child: Material(
+        color: color,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(
+              running ? Icons.stop_rounded : Icons.arrow_upward,
+              size: 18,
+              color: running ? scheme.onError : scheme.onPrimary,
+            ),
+          ),
         ),
       ),
     );

@@ -16,6 +16,14 @@ import 'llm_client.dart';
 import 'llm_models.dart';
 import '../../domain/conversation.dart' as conv show MessageRole;
 
+/// Cooperative cancellation handle for an in-progress stream. The caller
+/// (EditorStateNotifier.stop) flips [cancelled]; the streaming loop polls it
+/// between chunks and aborts, treating the partial text so far as the result.
+class CancelToken {
+  bool cancelled = false;
+  void cancel() => cancelled = true;
+}
+
 class RetryResult {
   /// The final accumulated response (content/reasoning/tool calls), merged
   /// across the partial + continuation.
@@ -27,6 +35,9 @@ class RetryResult {
   /// True if the stream failed and could not be recovered automatically.
   final bool failed;
 
+  /// True if the caller cancelled the stream via a [CancelToken].
+  final bool cancelled;
+
   /// Accumulated partial text at the moment of failure (for manual retry UI).
   final String partialText;
 
@@ -34,6 +45,7 @@ class RetryResult {
     required this.response,
     this.retries = 0,
     this.failed = false,
+    this.cancelled = false,
     this.partialText = '',
   });
 }
@@ -44,10 +56,13 @@ class StreamingRetry {
 
   /// Run a stream with automatic retry-on-interruption. [onChunk] receives
   /// every emitted chunk (including from continuation attempts) so the UI can
-  /// render live.
+  /// render live. [cancelToken], if provided, lets the caller abort the stream
+  /// cooperatively; on cancellation the partial response is returned with
+  /// [RetryResult.cancelled] set.
   Future<RetryResult> runWithRetry({
     required LlmRequest request,
     required void Function(LlmChunk) onChunk,
+    CancelToken? cancelToken,
   }) async {
     final acc = StreamAccumulator();
     var attempt = 0;
@@ -55,13 +70,38 @@ class StreamingRetry {
     LlmRequest req = request;
 
     while (true) {
+      if (cancelToken?.cancelled ?? false) {
+        return RetryResult(
+          response: acc.build(),
+          retries: retries,
+          cancelled: true,
+          partialText: acc.build().content,
+        );
+      }
       try {
         await for (final chunk in client.stream(req)) {
+          if (cancelToken?.cancelled ?? false) break;
           acc.add(chunk);
           onChunk(chunk);
         }
+        if (cancelToken?.cancelled ?? false) {
+          return RetryResult(
+            response: acc.build(),
+            retries: retries,
+            cancelled: true,
+            partialText: acc.build().content,
+          );
+        }
         return RetryResult(response: acc.build(), retries: retries);
       } catch (e) {
+        if (cancelToken?.cancelled ?? false) {
+          return RetryResult(
+            response: acc.build(),
+            retries: retries,
+            cancelled: true,
+            partialText: acc.build().content,
+          );
+        }
         if (attempt >= client.config.autoRetryCount) {
           return RetryResult(
             response: acc.build(),

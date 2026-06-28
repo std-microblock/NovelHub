@@ -4,6 +4,7 @@ library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/llm/streaming_retry.dart' show CancelToken;
 import '../domain/conversation.dart';
 import '../domain/entities.dart';
 import '../domain/paragraph_doc.dart';
@@ -96,6 +97,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   int _nowTick = 0;
   String? _novelId;
   String? _chapterId;
+  CancelToken? _cancelToken;
 
   EditorStateNotifier(this._ref)
       : super(EditorState(
@@ -347,6 +349,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
       turnId: turnId,
     );
     state.conversation.messages.add(userMsg);
+    _cancelToken = CancelToken();
     state = state.copyWith(
         agentRunning: true,
         streamingMessages: const [],
@@ -365,6 +368,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
             .toList(),
         userMessage: userMsg,
         now: _tick(),
+        cancelToken: _cancelToken,
         onTurnUpdate: (snap) {
           // The whole turn's messages stream live. Last assistant element
           // is the in-progress one.
@@ -381,6 +385,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
               m.role == MessageRole.tool)
           .toList();
       state.conversation.messages.addAll(committed);
+      _cancelToken = null;
       state = state.copyWith(
           agentRunning: false,
           streamingMessages: const [],
@@ -395,12 +400,21 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
               m.role == MessageRole.tool)
           .toList();
       state.conversation.messages.addAll(partial);
+      _cancelToken = null;
       state = state.copyWith(
         agentRunning: false,
         streamingMessages: const [],
         lastError: e,
       );
     }
+  }
+
+  /// Abort the in-progress agent turn. The streaming loop checks the cancel
+  /// token between chunks and returns the partial assistant message, which is
+  /// then committed so the user keeps what was generated.
+  void stop() {
+    if (!state.agentRunning) return;
+    _cancelToken?.cancel();
   }
 
   /// Jump the timeline back to the state at [messageId] without resending.

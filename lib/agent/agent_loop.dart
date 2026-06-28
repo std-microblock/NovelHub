@@ -16,7 +16,6 @@ import '../domain/rich_text.dart';
 import 'system_prompt.dart';
 import 'tool_registry.dart';
 import 'package:uuid/uuid.dart';
-
 const _uuid = Uuid();
 
 /// Snapshot of an in-progress assistant turn, emitted on each change.
@@ -59,7 +58,9 @@ class AgentLoop {
 
   /// Run one full turn for [userMessage]. [history] is the prior non-system
   /// conversation (already persisted). Returns the final assistant message
-  /// and the list of tool results produced.
+  /// and the list of tool results produced. [cancelToken] lets the caller
+  /// abort mid-stream; on cancel, the partial assistant message is emitted
+  /// and the turn ends (no further rounds).
   Future<TurnSnapshot> run({
     required Novel novel,
     required ParagraphDoc doc,
@@ -68,6 +69,7 @@ class AgentLoop {
     required Message userMessage,
     required int now,
     required TurnUpdate onTurnUpdate,
+    CancelToken? cancelToken,
   }) async {
     final system = promptBuilder.build(
         novel: novel, doc: doc, chapterTitle: chapterTitle);
@@ -97,6 +99,10 @@ class AgentLoop {
     final turnMessages = <Message>[];
 
     while (round < maxRounds) {
+      if (cancelToken?.cancelled ?? false) {
+        return TurnSnapshot(
+            messages: turnMessages, toolResults: toolResults);
+      }
       round++;
       final req = LlmRequest(
         model: client.config.modelName,
@@ -120,6 +126,7 @@ class AgentLoop {
       final retry = StreamingRetry(client);
       final result = await retry.runWithRetry(
         request: req,
+        cancelToken: cancelToken,
         onChunk: (chunk) {
           if (chunk.contentDelta != null && chunk.contentDelta!.isNotEmpty) {
             final i = turnMessages.indexOf(assistant);
@@ -151,6 +158,12 @@ class AgentLoop {
       );
       turnMessages[i] = assistant;
       emit();
+
+      // If the user cancelled mid-stream, end the turn with what we have.
+      if (result.cancelled) {
+        return TurnSnapshot(
+            messages: turnMessages, toolResults: toolResults);
+      }
 
       if (resp.toolCalls.isEmpty) {
         // Final reply.
