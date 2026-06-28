@@ -113,42 +113,14 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
           );
         }
         final s = _novel.characterSettings[i];
-        return Card(
+        return _CharacterSettingCard(
           key: ValueKey(s.id),
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        key: ValueKey('set-name-${s.id}'),
-                        initialValue: s.name,
-                        decoration: const InputDecoration(labelText: '名称'),
-                        onChanged: (v) => s.name = v,
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () {
-                        setState(
-                            () => _novel.characterSettings.removeAt(i));
-                        ref.read(novelListProvider.notifier).save(_novel);
-                      },
-                    ),
-                  ],
-                ),
-                TextFormField(
-                  key: ValueKey('set-desc-${s.id}'),
-                  initialValue: s.description,
-                  maxLines: 3,
-                  decoration: const InputDecoration(labelText: '描述'),
-                  onChanged: (v) => s.description = v,
-                ),
-              ],
-            ),
-          ),
+          setting: s,
+          onDelete: () {
+            setState(() =>
+                _novel.characterSettings.removeWhere((x) => x.id == s.id));
+            ref.read(novelListProvider.notifier).save(_novel);
+          },
         );
       },
     );
@@ -170,32 +142,142 @@ class _NovelSettingsPageState extends ConsumerState<NovelSettingsPage> {
           );
         }
         final r = _novel.textRequirements[i];
-        return Card(
+        return _RequirementCard(
           key: ValueKey(r.id),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextFormField(
-                  key: ValueKey('req-${r.id}'),
-                  initialValue: r.text,
-                  decoration: const InputDecoration(
-                      border: InputBorder.none, contentPadding: EdgeInsets.all(12)),
-                  onChanged: (v) => r.text = v,
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () {
-                  setState(() => _novel.textRequirements.removeAt(i));
-                  // Persist immediately so the deletion survives a re-open
-                  // even if the user never taps the save FAB.
-                  ref.read(novelListProvider.notifier).save(_novel);
-                },
-              ),
-            ],
-          ),
+          requirement: r,
+          onDelete: () {
+            setState(
+                () => _novel.textRequirements.removeWhere((x) => x.id == r.id));
+            ref.read(novelListProvider.notifier).save(_novel);
+          },
         );
       },
+    );
+  }
+}
+
+/// One text-requirement row. Owns its own [TextEditingController] so the
+/// field never leaks state across list-item reuse (the prior
+/// `initialValue`-in-ListView approach caused deletes to target the wrong
+/// row because the controller/outside closure got reused with stale indices).
+class _RequirementCard extends StatefulWidget {
+  final TextRequirement requirement;
+  final VoidCallback onDelete;
+  const _RequirementCard({
+    super.key,
+    required this.requirement,
+    required this.onDelete,
+  });
+
+  @override
+  State<_RequirementCard> createState() => _RequirementCardState();
+}
+
+class _RequirementCardState extends State<_RequirementCard> {
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.requirement.text);
+    _ctrl.addListener(_sync);
+  }
+
+  void _sync() => widget.requirement.text = _ctrl.text;
+
+  @override
+  void dispose() {
+    _ctrl.removeListener(_sync);
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _ctrl,
+              decoration: const InputDecoration(
+                  border: InputBorder.none, contentPadding: EdgeInsets.all(12)),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            onPressed: widget.onDelete,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One character/prop setting row. Same per-item controller approach as
+/// [_RequirementCard] to avoid ListView reuse bugs.
+class _CharacterSettingCard extends StatefulWidget {
+  final SettingEntry setting;
+  final VoidCallback onDelete;
+  const _CharacterSettingCard({
+    super.key,
+    required this.setting,
+    required this.onDelete,
+  });
+
+  @override
+  State<_CharacterSettingCard> createState() => _CharacterSettingCardState();
+}
+
+class _CharacterSettingCardState extends State<_CharacterSettingCard> {
+  late final TextEditingController _name;
+  late final TextEditingController _desc;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.setting.name);
+    _desc = TextEditingController(text: widget.setting.description);
+    _name.addListener(() => widget.setting.name = _name.text);
+    _desc.addListener(() => widget.setting.description = _desc.text);
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _desc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _name,
+                    decoration: const InputDecoration(labelText: '名称'),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: widget.onDelete,
+                ),
+              ],
+            ),
+            TextField(
+              controller: _desc,
+              maxLines: 3,
+              decoration: const InputDecoration(labelText: '描述'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
