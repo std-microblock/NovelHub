@@ -179,6 +179,13 @@ class AgentLoop {
         },
       );
 
+      // If the stream failed past all automatic retries, surface the error to
+      // the caller (EditorStateNotifier catches it → lastError banner) instead
+      // of silently treating the empty response as a final reply.
+      if (result.failed) {
+        throw _StreamFailedException(result.error, result.retries);
+      }
+
       final resp = result.response;
       final i = turnMessages.indexOf(assistant);
       assistant = Message(
@@ -285,6 +292,18 @@ class _ToolCallBuilder {
   String id = '';
   String name = '';
   final StringBuffer arguments = StringBuffer();
+}
+
+/// Thrown when streaming failed past all automatic retries. Carries the
+/// underlying error + retry count so the UI banner can report both.
+class _StreamFailedException implements Exception {
+  final Object? error;
+  final int retries;
+  const _StreamFailedException(this.error, this.retries);
+
+  @override
+  String toString() =>
+      'API 请求失败（已重试 $retries 次）${error == null ? '' : ': $error'}';
 }
 
 // Local import-free id helper avoids pulling uuid here.

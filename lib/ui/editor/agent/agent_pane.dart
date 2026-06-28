@@ -119,7 +119,7 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                       editor.lastError!,
                       style: TextStyle(
                           fontSize: 12, color: scheme.onErrorContainer),
-                      maxLines: 3,
+                      maxLines: 5,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),

@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../data/llm/llm_client.dart';
+import '../../../data/llm/llm_models.dart';
+import '../../../data/llm/openai_transport.dart' show LlmHttpException;
+import '../../../data/llm/provider_factory.dart';
+import '../../../domain/conversation.dart' show MessageRole;
 import '../../../state/providers.dart';
 
 /// Unified provider config form. The type dropdown reveals provider-specific
@@ -18,6 +22,7 @@ class ProviderConfigForm extends ConsumerStatefulWidget {
 
 class _ProviderConfigFormState extends ConsumerState<ProviderConfigForm> {
   late ProviderConfig _cfg = widget.config;
+  bool _testing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -26,6 +31,16 @@ class _ProviderConfigFormState extends ConsumerState<ProviderConfigForm> {
       appBar: AppBar(
         title: Text(widget.isNew ? '新增配置' : '编辑 ${_cfg.name}'),
         actions: [
+          IconButton(
+            icon: _testing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.network_check),
+            tooltip: '测试连接',
+            onPressed: _testing ? null : _testConnection,
+          ),
           IconButton(
             icon: const Icon(Icons.save),
             onPressed: _save,
@@ -119,6 +134,72 @@ class _ProviderConfigFormState extends ConsumerState<ProviderConfigForm> {
             keyboardType: TextInputType.number,
             onChanged: (v) => _cfg = _cfg.copyWith(
                 autoRetryCount: int.tryParse(v) ?? 3),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _testConnection() async {
+    setState(() => _testing = true);
+    final cfg = _cfg.copy();
+    final client = buildLlmClient(cfg);
+    final req = LlmRequest(
+      model: cfg.modelName,
+      messages: [
+        LlmMessage(role: MessageRole.user, content: '说一个字'),
+      ],
+      temperature: 0,
+      stream: false,
+    );
+    try {
+      final resp = await client.complete(req);
+      if (!mounted) return;
+      final preview = resp.content.trim();
+      _showResult(
+        ok: true,
+        title: '连接成功',
+        body: '模型：${cfg.modelName}'
+            '${preview.isEmpty ? '' : '\n返回：${preview.length > 80 ? '${preview.substring(0, 80)}…' : preview}'}',
+      );
+    } on LlmHttpException catch (e) {
+      if (!mounted) return;
+      _showResult(
+        ok: false,
+        title: '连接失败 (HTTP ${e.statusCode})',
+        body: _truncateBody(e.body),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showResult(
+        ok: false,
+        title: '连接失败',
+        body: e.toString(),
+      );
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  String _truncateBody(String body) {
+    final b = body.trim();
+    if (b.length <= 300) return b;
+    return '${b.substring(0, 300)}…';
+  }
+
+  void _showResult({required bool ok, required String title, required String body}) {
+    final scheme = Theme.of(context).colorScheme;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: Icon(ok ? Icons.check_circle : Icons.error_outline,
+            color: ok ? scheme.primary : scheme.error),
+        title: Text(title),
+        content: SelectableText(body, style: const TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('好的'),
           ),
         ],
       ),

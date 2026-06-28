@@ -35,6 +35,10 @@ class RetryResult {
   /// True if the stream failed and could not be recovered automatically.
   final bool failed;
 
+  /// The last error captured when [failed] is true. Surfaced to the caller
+  /// so it can be reported to the user instead of being swallowed.
+  final Object? error;
+
   /// True if the caller cancelled the stream via a [CancelToken].
   final bool cancelled;
 
@@ -45,6 +49,7 @@ class RetryResult {
     required this.response,
     this.retries = 0,
     this.failed = false,
+    this.error,
     this.cancelled = false,
     this.partialText = '',
   });
@@ -107,6 +112,7 @@ class StreamingRetry {
             response: acc.build(),
             retries: retries,
             failed: true,
+            error: e,
             partialText: acc.build().content,
           );
         }
@@ -174,11 +180,12 @@ class StreamingRetry {
         onChunk(chunk);
       }
       return RetryResult(response: acc.build(), retries: 1, partialText: '');
-    } catch (_) {
+    } catch (e) {
       return RetryResult(
         response: acc.build(),
         retries: 1,
         failed: true,
+        error: e,
         partialText: partialText,
       );
     }
