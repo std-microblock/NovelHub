@@ -52,6 +52,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         ),
         title: _chapterSwitch(editor),
         actions: [
+          // Manually add a new chapter (mirrors the agent's add_chapter tool).
+          IconButton(
+            icon: const Icon(Icons.post_add),
+            tooltip: '新增章节',
+            onPressed: () => _promptNewChapter(context),
+          ),
           // Right-swipe affordance -> novel settings.
           IconButton(
             icon: const Icon(Icons.tune),
@@ -165,6 +171,36 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     );
   }
 
+  Future<void> _promptNewChapter(BuildContext context) async {
+    final ctrl = TextEditingController();
+    final chapters = ref.read(editorStateProvider).novel.chapters;
+    ctrl.text = '第${chapters.length + 1}章';
+    ctrl.selection = TextSelection(
+        baseOffset: 0, extentOffset: ctrl.text.length);
+    final title = await showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('新增章节'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '章节标题'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, ctrl.text.trim()),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (title != null && title.isNotEmpty && context.mounted) {
+      await ref.read(editorStateProvider.notifier).addChapter(title);
+    }
+  }
+
   Widget _chapterSwitch(EditorState editor) {
     final chapters = editor.novel.chapters;
     return ConstrainedBox(
@@ -187,9 +223,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
             ),
         ],
         onChanged: (id) {
-          if (id != null) {
-            ref.read(editorStateProvider.notifier).selectChapter(id);
-          }
+          if (id == null) return;
+          ref.read(editorStateProvider.notifier).selectChapter(id);
         },
       ),
     );

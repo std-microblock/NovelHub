@@ -205,6 +205,28 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   void clearSelection() =>
       state = state.copyWith(selectedParagraphIds: {});
 
+  // --- chapter structure (manual, UI-driven) ---
+
+  /// Append a new chapter and switch to it. Mirrors the agent's `add_chapter`
+  /// tool path (mutates the NovelDoc + records a timeline event) so manual
+  /// chapter creation is undo-consistent with agent-created chapters. A
+  /// synthetic messageId tags the event; it is never referenced by any
+  /// conversation message so it can't be reverted via the turn undo buttons.
+  Future<String?> addChapter(String title) async {
+    final t = title.trim();
+    if (t.isEmpty) return null;
+    final ev = state.novelDoc.addChapter(
+      title: t,
+      messageId: 'manual-${_tick()}',
+    );
+    final chapterId = ev.chapterId;
+    if (chapterId == null) return null;
+    selectChapter(chapterId);
+    _bump();
+    await persistNovel();
+    return chapterId;
+  }
+
   // --- doc edits from the editor (edit mode) ---
 
   /// Replace the whole chapter body from a single text field. Paragraphs are

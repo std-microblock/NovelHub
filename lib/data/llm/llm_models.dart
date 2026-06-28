@@ -58,6 +58,17 @@ class LlmMessage {
     if (reasoningContent.isNotEmpty) m['reasoning_content'] = reasoningContent;
     if (prefix) m['prefix'] = true;
     if (toolCallId != null) m['tool_call_id'] = toolCallId;
+    // An assistant message with neither `content` nor `tool_calls` is rejected
+    // by OpenAI-compatible APIs ("content or tool_calls must be set"). This
+    // happens for prefix-continuation seeds whose partial content is still
+    // empty (e.g. only reasoning streamed so far) on providers that don't
+    // support the DeepSeek `prefix` flag. Emit an explicit empty string so the
+    // request body is always valid.
+    if (role == conv.MessageRole.assistant &&
+        !m.containsKey('content') &&
+        !m.containsKey('tool_calls')) {
+      m['content'] = '';
+    }
     return m;
   }
 }
