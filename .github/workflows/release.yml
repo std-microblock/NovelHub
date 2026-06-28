@@ -44,7 +44,23 @@ jobs:
       - name: Generate codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Build Android (debug-signed APK, split per ABI)
+      - name: Restore Android signing keystore
+        if: matrix.target == 'android'
+        shell: bash
+        run: |
+          # Recreate the release keystore + key.properties from secrets so
+          # every nightly build is signed with the same key.
+          mkdir -p android
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/novelhub.jks
+          cat > android/key.properties <<EOF
+          storeFile=novelhub.jks
+          storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+          ls -la android/novelhub.jks android/key.properties
+
+      - name: Build Android (release-signed APK, split per ABI)
         if: matrix.target == 'android'
         run: flutter build apk --release --split-per-abi
 
@@ -115,7 +131,7 @@ jobs:
           {
             echo
             echo
-            echo "_Automated build from push to master. Artifacts are debug-signed._"
+            echo "_Automated build from push to master. Android APKs are release-signed._"
           } >> NOTES.md
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
