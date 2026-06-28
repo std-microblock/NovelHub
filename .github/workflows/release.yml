@@ -26,8 +26,6 @@ jobs:
         include:
           - os: ubuntu-latest
             target: android
-            artifact: build/app/outputs/flutter-apk/app-release.apk
-            asset_name: novelhub-android.apk
           - os: windows-latest
             target: windows
             artifact: build/windows/x64/runner/Release
@@ -46,9 +44,9 @@ jobs:
       - name: Generate codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Build Android (debug-signed APK)
+      - name: Build Android (debug-signed APK, split per ABI)
         if: matrix.target == 'android'
-        run: flutter build apk --release
+        run: flutter build apk --release --split-per-abi
 
       - name: Build Windows
         if: matrix.target == 'windows'
@@ -60,12 +58,25 @@ jobs:
         run: |
           Compress-Archive -Path "${{ matrix.artifact }}/*" -DestinationPath "${{ matrix.asset_name }}" -Force
 
-      - name: Stage Android artifact
+      - name: Stage Android per-ABI artifacts
         if: matrix.target == 'android'
         shell: bash
-        run: cp "${{ matrix.artifact }}" "${{ matrix.asset_name }}"
+        run: |
+          mkdir -p staged
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk  staged/novelhub-android-arm64-v8a.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk staged/novelhub-android-armeabi-v7a.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk      staged/novelhub-android-x86_64.apk
+          ls -lh staged/
 
       - uses: actions/upload-artifact@v4
+        if: matrix.target == 'android'
+        with:
+          name: android-apks
+          path: staged/*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'windows'
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
