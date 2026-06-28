@@ -20,7 +20,13 @@ class EditorScreen extends ConsumerStatefulWidget {
 
 class _EditorScreenState extends ConsumerState<EditorScreen> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
-  double _agentFraction = 0.45;
+  // Raw pixel height of the agent panel (portrait only). Tracked directly off
+  // the finger's absolute position — no delta accumulation — so the handle
+  // follows the finger 1:1 regardless of gesture-arena delta coalescing.
+  double? _agentH;
+  // Anchors captured on drag start: global Y and height at that moment.
+  double _dragStartY = 0;
+  double _dragStartH = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -75,46 +81,82 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
               ],
             );
           }
-          // Vertical split with a draggable handle controlling the agent
-          // panel height.
-          const handleH = 10.0;
+          // Vertical split: editor on top, a floating agent panel docked to
+          // the bottom edge with rounded top corners + shadow. The drag handle
+          // is an overlay that takes no layout space and only shows on hover or
+          // while dragging.
           final total = constraints.maxHeight;
-          final agentH = (total * _agentFraction)
-              .clamp(120.0, total - 120 - handleH)
+          final agentH = (_agentH ?? total * 0.45)
+              .clamp(120.0, total - 80)
               .toDouble();
-          return Column(
+          return Stack(
+            // No clip so the shadow can spread above the panel onto the editor.
+            clipBehavior: Clip.none,
             children: [
-              SizedBox(
-                  height: total - agentH - handleH,
-                  child: EditorPane(editor: editor)),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onVerticalDragUpdate: (d) {
-                  setState(() {
-                    _agentFraction = (agentH - d.delta.dy) / total;
-                    _agentFraction = _agentFraction.clamp(0.15, 0.85);
-                  });
-                },
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.resizeRow,
-                  child: Container(
-                    height: handleH,
-                    color:
-                        Theme.of(context).colorScheme.surfaceContainerLow,
-                    child: Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.outline,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
+              // Upper editor fills everything; the floating panel overlaps its
+              // lower portion (the shadow sits on top of the editor).
+              Positioned.fill(
+                child: EditorPane(editor: editor),
+              ),
+              // Floating agent panel: top rounded corners + drop shadow; the
+              // bottom edge is flush with the screen bottom (square corners).
+              // BoxShadow (not Material.elevation) so it paints even though the
+              // panel body itself is colored by AgentPane — and it survives the
+              // transparent-background rendering path.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: agentH,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.transparent,
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(16),
                     ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.28),
+                        blurRadius: 16,
+                        spreadRadius: -2,
+                        offset: const Offset(0, -3),
+                      ),
+                    ],
+                  ),
+                  child: ClipPath(
+                    clipper: const _TopRoundClipper(top: 16),
+                    child: AgentPane(editor: editor),
                   ),
                 ),
               ),
-              SizedBox(height: agentH, child: AgentPane(editor: editor)),
+              // Drag handle: overlay straddling the panel's top edge, no layout
+              // footprint. Kept thin and mostly inside the panel's top padding
+              // so it doesn't block the header's tap targets.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: agentH - 6,
+                height: 14,
+                child: _AgentHandle(
+                  // Absolute-position based: recompute height from the finger's
+                  // global Y every frame instead of accumulating deltas. Delta
+                  // accumulation was losing ~1/3 of the motion (fixed ratio),
+                  // likely from gesture-arena delta coalescing. Position-based
+                  // dragging is immune to that — the panel tracks the finger 1:1.
+                  onStart: (startGlobalY) {
+                    _dragStartY = startGlobalY;
+                    _dragStartH = agentH;
+                  },
+                  onUpdate: (globalY) {
+                    setState(() {
+                      final dragDistance = _dragStartY - globalY;
+                      _agentH = (_dragStartH + dragDistance)
+                          .clamp(120.0, total - 80)
+                          .toDouble();
+                    });
+                  },
+                ),
+              ),
             ],
           );
         },
@@ -153,4 +195,87 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
           ),
     );
   }
+}
+
+/// The floating agent panel's drag handle. Takes no layout space (it's an
+/// overlay) and the grip bar only appears on hover or while dragging.
+class _AgentHandle extends StatefulWidget {
+  final void Function(double startGlobalY) onStart;
+  final void Function(double globalY) onUpdate;
+  const _AgentHandle({required this.onStart, required this.onUpdate});
+
+  @override
+  State<_AgentHandle> createState() => _AgentHandleState();
+}
+
+class _AgentHandleState extends State<_AgentHandle> {
+  bool _hover = false;
+  bool _dragging = false;
+
+  bool get _active => _hover || _dragging;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeRow,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        // Opaque so the handle wins the vertical-drag gesture outright —
+        // otherwise the ListView below it competes in the arena and swallows
+        // part of every drag, which makes the panel lag behind the finger.
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragStart: (d) {
+          setState(() => _dragging = true);
+          // Hand the starting global Y to the parent so it can anchor the
+          // absolute-position-based height computation.
+          widget.onStart(d.globalPosition.dy);
+        },
+        // Recompute the target height from the finger's *absolute* position
+        // every update — immune to delta coalescing/loss that broke
+        // delta-based dragging (it tracked at ~2/3 speed).
+        onVerticalDragUpdate: (d) => widget.onUpdate(d.globalPosition.dy),
+        onVerticalDragEnd: (_) => setState(() => _dragging = false),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 120),
+          opacity: _active ? 1 : 0,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: scheme.outline,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Clips only the top corners rounded, leaving the bottom edge square so the
+/// floating panel sits flush against the screen bottom while the [Material]
+/// above paints the matching rounded shadow.
+class _TopRoundClipper extends CustomClipper<Path> {
+  final double top;
+  const _TopRoundClipper({required this.top});
+
+  @override
+  Path getClip(Size size) {
+    final r = Radius.circular(top);
+    return Path()
+      ..moveTo(0, top)
+      ..arcToPoint(Offset(top, 0), radius: r)
+      ..lineTo(size.width - top, 0)
+      ..arcToPoint(Offset(size.width, top), radius: r)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+  }
+
+  @override
+  bool shouldReclip(_TopRoundClipper old) => old.top != top;
 }
