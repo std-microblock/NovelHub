@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'dart:convert';
 
 import '../../../domain/conversation.dart';
 import '../../../domain/rich_text.dart';
 import 'ref_badge.dart';
-
 /// One message row.
 ///  - Assistant content rendered as Markdown.
 ///  - CoT (reasoning_content) is collapsible, collapsed by default.
@@ -99,13 +99,29 @@ class _MessageTileState extends State<MessageTile> {
     );
   }
 }
-/// A merged tool-call + result block: collapsed by default, animated expand.
-/// Shows the tool name + status; expands to reveal the call arguments JSON and
-/// the tool result JSON together. Max width constrained like the bubbles.
+/// A merged tool-call + result block.
+///
+/// Expand/collapse behavior:
+///  - When [streaming] is true (the call's arguments are still arriving or
+///    the tool result has not landed yet), the block auto-expands so the user
+///    sees the parameters stream in live.
+///  - When the result lands (streaming flips to false), the block
+///    auto-collapses back to its one-line summary. The user can still tap to
+///    re-expand at any time.
+///
+/// For `edit_range` / `insert_at`, the call's `new_text` argument is parsed
+/// and rendered as normal readable text (split into paragraphs) instead of
+/// raw JSON, since it is novel prose the user authored.
 class ToolCallBlock extends StatefulWidget {
   final ToolCall call;
   final String? resultContent; // null = still running / no result yet
-  const ToolCallBlock({super.key, required this.call, this.resultContent});
+  final bool streaming; // args arriving or result pending
+  const ToolCallBlock({
+    super.key,
+    required this.call,
+    this.resultContent,
+    this.streaming = false,
+  });
 
   @override
   State<ToolCallBlock> createState() => _ToolCallBlockState();
@@ -123,6 +139,23 @@ class _ToolCallBlockState extends State<ToolCallBlock>
     _ctrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 180));
     _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOutCubic);
+    // Start expanded if already streaming on first mount.
+    _expanded = widget.streaming;
+    if (_expanded) _ctrl.value = 1.0;
+  }
+
+  @override
+  void didUpdateWidget(covariant ToolCallBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Auto-expand while streaming so the user sees args stream in live.
+    if (widget.streaming && !_expanded) {
+      _expanded = true;
+      _ctrl.forward();
+    } else if (!widget.streaming && oldWidget.streaming && _expanded) {
+      // Streaming just finished (result landed) → auto-collapse once.
+      _expanded = false;
+      _ctrl.reverse();
+    }
   }
 
   @override
@@ -144,6 +177,22 @@ class _ToolCallBlockState extends State<ToolCallBlock>
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final hasResult = widget.resultContent != null;
+    final textSpec = _TextToolSpec.tryParse(widget.call);
+    final body = Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: textSpec != null
+          ? _TextToolBody(spec: textSpec, scheme: scheme)
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _Labeled('参数', widget.call.arguments, scheme),
+                if (hasResult) ...[
+                  const SizedBox(height: 4),
+                  _Labeled('结果', widget.resultContent!, scheme),
+                ],
+              ],
+            ),
+    );
     return Container(
       constraints: const BoxConstraints(maxWidth: 560),
       margin: const EdgeInsets.only(top: 4, bottom: 2),
@@ -162,11 +211,12 @@ class _ToolCallBlockState extends State<ToolCallBlock>
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
                 children: [
-                  Icon(Icons.build, size: 13, color: scheme.onTertiaryContainer),
+                  Icon(_toolIcon(widget.call.name),
+                      size: 13, color: scheme.onTertiaryContainer),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      '调用工具 · ${widget.call.name}',
+                      _summary(widget.call, widget.resultContent),
                       style: TextStyle(
                           fontSize: 12,
                           color: scheme.onTertiaryContainer),
@@ -174,7 +224,7 @@ class _ToolCallBlockState extends State<ToolCallBlock>
                   ),
                   if (hasResult)
                     Icon(Icons.check_circle, size: 13, color: scheme.primary)
-                  else
+                  else if (widget.streaming)
                     SizedBox(
                       width: 13,
                       height: 13,
@@ -182,7 +232,10 @@ class _ToolCallBlockState extends State<ToolCallBlock>
                         strokeWidth: 2,
                         color: scheme.onTertiaryContainer,
                       ),
-                    ),
+                    )
+                  else
+                    Icon(Icons.hourglass_top, size: 13,
+                        color: scheme.onTertiaryContainer),
                   const SizedBox(width: 4),
                   Icon(_expanded ? Icons.expand_less : Icons.expand_more,
                       size: 16, color: scheme.onTertiaryContainer),
@@ -193,20 +246,190 @@ class _ToolCallBlockState extends State<ToolCallBlock>
           SizeTransition(
             sizeFactor: _anim,
             axisAlignment: 1.0,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _Labeled('参数', widget.call.arguments, scheme),
-                  if (hasResult) ...[
-                    const SizedBox(height: 4),
-                    _Labeled('结果', widget.resultContent!, scheme),
-                  ],
-                ],
-              ),
-            ),
+            child: body,
           ),
+        ],
+      ),
+    );
+  }
+
+  /// One-line summary for the (possibly collapsed) header. Prefers the
+  /// tool's structured result `summary` field; falls back to the tool name
+  /// + a short arg hint for edit/insert; otherwise the raw tool name.
+  String _summary(ToolCall call, String? resultContent) {
+    if (resultContent != null) {
+      final decoded = _tryDecode(resultContent);
+      final s = decoded?['summary'];
+      if (s is String && s.isNotEmpty) return s;
+    }
+    final spec = _TextToolSpec.tryParse(call);
+    if (spec != null) return spec.header;
+    return '调用工具 · ${call.name}';
+  }
+
+  IconData _toolIcon(String name) {
+    switch (name) {
+      case 'edit_range':
+        return Icons.edit_note;
+      case 'insert_at':
+        return Icons.post_add;
+      case 'delete_range':
+        return Icons.delete_outline;
+      default:
+        return Icons.build;
+    }
+  }
+
+  static Map<String, dynamic>? _tryDecode(String json) {
+    try {
+      return (jsonDecode(json) as Map).cast<String, dynamic>();
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Parsed view of an `edit_range` / `insert_at` / `delete_range` tool call,
+/// rendering prose (`new_text`) as normal text rather than raw JSON.
+class _TextToolSpec {
+  final String toolName; // edit_range | insert_at | delete_range
+  final String header; // one-line summary used when collapsed/streaming
+  final int? start;
+  final int? end;
+  final int? index;
+  final String? chapter;
+  final String newText; // raw new_text (may be partial while streaming)
+
+  _TextToolSpec({
+    required this.toolName,
+    required this.header,
+    this.start,
+    this.end,
+    this.index,
+    this.chapter,
+    required this.newText,
+  });
+
+  static _TextToolSpec? tryParse(ToolCall call) {
+    final name = call.name;
+    if (name != 'edit_range' && name != 'insert_at' && name != 'delete_range') {
+      return null;
+    }
+    Map<String, dynamic>? args;
+    // While streaming the arguments JSON may be incomplete / unparseable;
+    // fall back to treating the whole string as raw new_text so the prose
+    // still streams in.
+    String rawText = '';
+    if (call.arguments.trim().isNotEmpty) {
+      try {
+        args = (jsonDecode(call.arguments) as Map).cast<String, dynamic>();
+      } catch (_) {
+        // Partial JSON — best effort: pull out a new_text-ish tail.
+        args = null;
+        rawText = _extractPartialNewText(call.arguments);
+      }
+    }
+    final newText = (args?['new_text'] as String?) ?? rawText;
+    final chapter = args?['chapter']?.toString();
+    String header;
+    switch (name) {
+      case 'edit_range':
+        final s = args?['start'];
+        final e = args?['end'];
+        header = '修改段落'
+            '${s != null ? " 第 $s-${e ?? s} 段" : ""}'
+            '${chapter != null ? " · $chapter" : ""}';
+        break;
+      case 'insert_at':
+        final i = args?['index'];
+        header = '插入段落'
+            '${i != null ? " 于第 $i 段前" : ""}'
+            '${chapter != null ? " · $chapter" : ""}';
+        break;
+      default: // delete_range
+        final s = args?['start'];
+        final e = args?['end'];
+        header = '删除段落'
+            '${s != null ? " 第 $s-${e ?? s} 段" : ""}'
+            '${chapter != null ? " · $chapter" : ""}';
+        break;
+    }
+    return _TextToolSpec(
+      toolName: name,
+      header: header,
+      start: args?['start'] as int?,
+      end: args?['end'] as int?,
+      index: args?['index'] as int?,
+      chapter: chapter,
+      newText: newText,
+    );
+  }
+
+  /// While streaming, the args JSON is incomplete. `new_text` is usually the
+  /// last field, so a common partial shape is `{"start":12,"end":13,"new_text":"...`.
+  /// Pull out everything after the `"new_text":"` opener (best-effort; the
+  /// closing quote may be missing).
+  static String _extractPartialNewText(String raw) {
+    final markers = ['"new_text":"', '"new_text": "'];
+    for (final m in markers) {
+      final i = raw.indexOf(m);
+      if (i >= 0) return raw.substring(i + m.length);
+    }
+    return '';
+  }
+}
+
+/// Renders the parsed edit/insert/delete spec as readable text: a small meta
+/// line (start..end / index) followed by the new_text prose split into
+/// paragraphs, plus the result JSON if present.
+class _TextToolBody extends StatelessWidget {
+  final _TextToolSpec spec;
+  final ColorScheme scheme;
+  const _TextToolBody({required this.spec, required this.scheme});
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = <String>[];
+    if (spec.toolName == 'edit_range' && spec.start != null) {
+      meta.add('替换 第 ${spec.start}-${spec.end ?? spec.start} 段');
+    } else if (spec.toolName == 'insert_at' && spec.index != null) {
+      meta.add('插入位置 第 ${spec.index} 段前');
+    } else if (spec.toolName == 'delete_range' && spec.start != null) {
+      meta.add('删除 第 ${spec.start}-${spec.end ?? spec.start} 段');
+    }
+    if (spec.chapter != null) meta.add('章节 ${spec.chapter}');
+
+    final paras = spec.newText.isEmpty
+        ? <String>['（无内容）']
+        : spec.newText.split('\n\n');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (meta.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(meta.join('  ·  '),
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: scheme.onTertiaryContainer,
+                      fontFamily: 'monospace')),
+            ),
+          ...paras.map((p) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(p,
+                    style: TextStyle(
+                        fontSize: 12,
+                        height: 1.5,
+                        color: scheme.onSurface)),
+              )),
         ],
       ),
     );

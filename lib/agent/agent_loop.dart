@@ -125,25 +125,57 @@ class AgentLoop {
       void emit() => onTurnUpdate(
           TurnSnapshot(messages: turnMessages, toolResults: toolResults));
 
+      // Incremental tool-call accumulator: streams tool-call arguments
+      // char-by-char into the live assistant message so the UI can render
+      // them as they arrive (not only after the stream finishes). The final
+      // resp.toolCalls (set below after the stream completes) is authoritative
+      // and overrides whatever was accumulated here.
+      final tcBuilders = <int, _ToolCallBuilder>{};
+
       final retry = StreamingRetry(client);
       final result = await retry.runWithRetry(
         request: req,
         cancelToken: cancelToken,
         onChunk: (chunk) {
-          if (chunk.contentDelta != null && chunk.contentDelta!.isNotEmpty) {
-            final i = turnMessages.indexOf(assistant);
-            assistant = Message(
-              id: assistant.id,
-              role: MessageRole.assistant,
-              content: assistant.content + (chunk.contentDelta ?? ''),
-              reasoningContent: assistant.reasoningContent,
-              toolCalls: assistant.toolCalls,
-              turnId: userMessage.turnId,
-              createdAt: assistant.createdAt,
-            );
-            turnMessages[i] = assistant;
-            emit();
+          final contentDelta = chunk.contentDelta;
+          final hasContent =
+              contentDelta != null && contentDelta.isNotEmpty;
+          final hasTools = chunk.toolCallDeltas.isNotEmpty;
+          if (!hasContent && !hasTools) return;
+          if (hasTools) {
+            chunk.toolCallDeltas.forEach((index, delta) {
+              final b = tcBuilders.putIfAbsent(index, _ToolCallBuilder.new);
+              if (delta.id != null) b.id = delta.id!;
+              if (delta.name != null) b.name = delta.name!;
+              if (delta.argumentsDelta != null) {
+                b.arguments.write(delta.argumentsDelta);
+              }
+            });
           }
+
+          final i = turnMessages.indexOf(assistant);
+          final newToolCalls = tcBuilders.isEmpty
+              ? assistant.toolCalls
+              : (tcBuilders.keys.toList()..sort()).map((k) {
+                  final b = tcBuilders[k]!;
+                  return ToolCall(
+                      id: b.id,
+                      name: b.name,
+                      arguments: b.arguments.toString());
+                }).toList();
+          assistant = Message(
+            id: assistant.id,
+            role: MessageRole.assistant,
+            content: hasContent
+                ? assistant.content + contentDelta
+                : assistant.content,
+            reasoningContent: assistant.reasoningContent,
+            toolCalls: newToolCalls,
+            turnId: userMessage.turnId,
+            createdAt: assistant.createdAt,
+          );
+          turnMessages[i] = assistant;
+          emit();
         },
       );
 
@@ -243,6 +275,16 @@ class AgentLoop {
   }
 
   String _newAssistantId() => _uuid.v4();
+}
+
+/// Local incremental builder for streaming tool calls (mirrors
+/// StreamAccumulator's _ToolCallBuilder but kept here so the agent loop can
+/// reflect partial tool-call args into the live snapshot before the stream
+/// resolves to its final LlmResponse).
+class _ToolCallBuilder {
+  String id = '';
+  String name = '';
+  final StringBuffer arguments = StringBuffer();
 }
 
 // Local import-free id helper avoids pulling uuid here.

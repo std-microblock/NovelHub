@@ -537,9 +537,17 @@ class _TurnCluster extends ConsumerWidget {
       ));
       if (m.role == MessageRole.assistant) {
         for (final tc in m.toolCalls) {
+          // The tool call is "streaming" (args arriving or result pending)
+          // while this turn is the live one AND its result hasn't landed yet.
+          // We broaden beyond `streaming` (which only covers the assistant-
+          // text phase) with `running` so the block stays expanded through the
+          // tool-dispatch phase until each call's own result arrives.
+          final callStreaming = (streaming || running) &&
+              resultByToolCall[tc.id] == null;
           children.add(ToolCallBlock(
             call: tc,
             resultContent: resultByToolCall[tc.id],
+            streaming: callStreaming,
           ));
         }
       }
