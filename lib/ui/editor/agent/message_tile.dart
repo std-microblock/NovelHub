@@ -28,13 +28,11 @@ class MessageTile extends StatefulWidget {
 
 class _MessageTileState extends State<MessageTile> {
   bool _cotExpanded = false;
-  final Map<String, bool> _toolExpanded = {}; // toolCallId -> expanded
 
   @override
   Widget build(BuildContext context) {
     final m = widget.message;
     final isUser = m.role == MessageRole.user;
-    final isAssistant = m.role == MessageRole.assistant;
     final isTool = m.role == MessageRole.tool;
     final scheme = Theme.of(context).colorScheme;
 

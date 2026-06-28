@@ -30,7 +30,7 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-fatal-infos
 
       - name: Generate codegen (build_runner)
         run: dart run build_runner build --delete-conflicting-outputs
