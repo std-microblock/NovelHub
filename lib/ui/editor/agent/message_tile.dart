@@ -378,8 +378,9 @@ class _TextToolSpec {
 }
 
 /// Renders the parsed edit/insert/delete spec as readable text: a small meta
-/// line (start..end / index) followed by the new_text prose split into
-/// paragraphs, plus the result JSON if present.
+/// line (start..end / index) followed by the new_text prose, with explicit
+/// line breaks preserved (a single `\n` renders as a line break, not folded
+/// into a space), plus the result JSON if present.
 class _TextToolBody extends StatelessWidget {
   final _TextToolSpec spec;
   final ColorScheme scheme;
@@ -397,9 +398,11 @@ class _TextToolBody extends StatelessWidget {
     }
     if (spec.chapter != null) meta.add('章节 ${spec.chapter}');
 
-    final paras = spec.newText.isEmpty
-        ? <String>['（无内容）']
-        : spec.newText.split('\n\n');
+    final proseStyle =
+        TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurface);
+    final prose = spec.newText.isEmpty
+        ? TextSpan(text: '（无内容）', style: proseStyle)
+        : _lineBreakPreservingSpan(spec.newText, proseStyle);
 
     return Container(
       width: double.infinity,
@@ -420,17 +423,29 @@ class _TextToolBody extends StatelessWidget {
                       color: scheme.onTertiaryContainer,
                       fontFamily: 'monospace')),
             ),
-          ...paras.map((p) => Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(p,
-                    style: TextStyle(
-                        fontSize: 12,
-                        height: 1.5,
-                        color: scheme.onSurface)),
-              )),
+          // RichText renders `\n` spans as real line breaks (plain Text would
+          // fold them into spaces).
+          Text.rich(prose, style: proseStyle),
         ],
       ),
     );
+  }
+
+  /// Build a [TextSpan] that preserves all `\n` as hard line breaks. A plain
+  /// TextSpan keeps them as soft newlines only inside RichText; splitting on
+  /// `\n` and re-joining with `\n` inside a Text.rich context yields true
+  /// line wrapping for each segment.
+  static TextSpan _lineBreakPreservingSpan(String text, TextStyle style) {
+    if (!text.contains('\n')) return TextSpan(text: text, style: style);
+    final lines = text.split('\n');
+    final spans = <InlineSpan>[];
+    for (var i = 0; i < lines.length; i++) {
+      if (i > 0) spans.add(const TextSpan(text: '\n'));
+      if (lines[i].isNotEmpty) {
+        spans.add(TextSpan(text: lines[i], style: style));
+      }
+    }
+    return TextSpan(children: spans, style: style);
   }
 }
 

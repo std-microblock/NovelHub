@@ -24,22 +24,63 @@ class AgentPane extends ConsumerStatefulWidget {
 
 class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
+  bool _autoScroll = true;
+  bool _showJumpButton = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
 
   @override
   void dispose() {
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
   }
 
+  /// Track whether the user is at the bottom. When the user scrolls away from
+  /// the bottom (manually, or via drag), auto-scroll is suspended; tapping the
+  /// floating "jump to bottom" button re-enables it.
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final distance = pos.maxScrollExtent - pos.pixels;
+    final atBottom = distance < 48;
+    if (atBottom != _autoScroll) {
+      setState(() => _autoScroll = atBottom);
+    }
+    final shouldShow = !_autoScroll;
+    if (shouldShow != _showJumpButton) {
+      setState(() => _showJumpButton = shouldShow);
+    }
+  }
+
   void _scrollToBottom() {
+    if (!_autoScroll) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(
-          _scroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 120),
-          curve: Curves.easeOut,
-        );
-      }
+      if (!_scroll.hasClients || !_autoScroll) return;
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    });
+  }
+
+  void _jumpToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      _scroll
+          .animateTo(
+        _scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      )
+          .then((_) {
+        if (!mounted) return;
+        setState(() {
+          _autoScroll = true;
+          _showJumpButton = false;
+        });
+      });
     });
   }
 
@@ -156,11 +197,23 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                       style: TextStyle(color: scheme.onSurfaceVariant),
                     ),
                   )
-                : _TurnList(
-                    controller: _scroll,
-                    committed: messages,
-                    streaming: streaming,
-                    streamingActive: streamingActive,
+                : Stack(
+                    children: [
+                      _TurnList(
+                        controller: _scroll,
+                        committed: messages,
+                        streaming: streaming,
+                        streamingActive: streamingActive,
+                      ),
+                      if (_showJumpButton)
+                        Positioned(
+                          right: 12,
+                          bottom: 8,
+                          child: _JumpToBottomButton(
+                            onTap: _jumpToBottom,
+                          ),
+                        ),
+                    ],
                   ),
           ),
           // Composer.
@@ -532,6 +585,7 @@ class _TurnCluster extends ConsumerWidget {
       // render the bubble first and the tool-call blocks after it. Tool result
       // messages in between are skipped above.
       children.add(MessageTile(
+        key: ValueKey(m.id),
         message: m,
         streaming: streaming && i == messages.length - 1,
       ));
@@ -545,6 +599,7 @@ class _TurnCluster extends ConsumerWidget {
           final callStreaming = (streaming || running) &&
               resultByToolCall[tc.id] == null;
           children.add(ToolCallBlock(
+            key: ValueKey('tc_${tc.id}'),
             call: tc,
             resultContent: resultByToolCall[tc.id],
             streaming: callStreaming,
@@ -682,6 +737,36 @@ class _ModelSwitcher extends StatelessWidget {
             Icon(Icons.keyboard_arrow_down,
                 size: 14, color: scheme.onSurfaceVariant),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _JumpToBottomButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _JumpToBottomButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.primary,
+      elevation: 3,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Tooltip(
+          message: '回到底部',
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(
+              Icons.keyboard_double_arrow_down_rounded,
+              size: 20,
+              color: scheme.onPrimary,
+            ),
+          ),
         ),
       ),
     );
