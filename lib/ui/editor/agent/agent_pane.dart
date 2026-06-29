@@ -59,6 +59,8 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
   bool _autoScroll = true;
   bool _showJumpButton = false;
+  // Last user-driven scroll offset, used to tell an upward flick from growth.
+  double _lastUserPixels = double.infinity;
   // Keys used to measure the header / composer height so EditorScreen can
   // clamp the panel's drag range (header-only floor, header+composer band).
   final _headerKey = GlobalKey();
@@ -96,6 +98,29 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
       _autoScroll = atBottom;
       setState(() => _showJumpButton = !atBottom);
     }
+    // Keep the baseline current so the next upward flick registers cleanly
+    // (programmatic jumpTo also routes through here with distance≈0, which we
+    // don't want to read as a user scroll-up).
+    _lastUserPixels = pos.pixels;
+  }
+
+  /// A *user* dragged the message list (as opposed to a programmatic jumpTo).
+  /// UserScrollNotification is emitted only by real gestures — the per-frame
+  /// jumpTo during streaming does NOT produce it — so this is the reliable way
+  /// to tell "the user is reading history" from "content grew". Dragging toward
+  /// the top of the list (pixels decreasing vs. the last user-driven position)
+  /// suspends auto-scroll; the hysteresis in [_onScroll] re-enables it once the
+  /// user scrolls back to the bottom. This is necessary because jumpTo itself
+  /// fires [_onScroll] with distance≈0, which would otherwise keep _autoScroll
+  /// pinned to true forever and swallow every upward flick.
+  bool _onUserScroll(UserScrollNotification n) {
+    final p = n.metrics.pixels;
+    if (p < _lastUserPixels && _autoScroll) {
+      _autoScroll = false;
+      if (mounted) setState(() => _showJumpButton = true);
+    }
+    _lastUserPixels = p;
+    return false;
   }
 
   /// Streaming-time auto-scroll: while the user is pinned to the bottom, jump
@@ -341,31 +366,34 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                           style: TextStyle(color: scheme.onSurfaceVariant),
                         ),
                       )
-                    : Stack(
-                        children: [
-                          _TurnList(controller: _scroll),
-                          // Jump-to-bottom button: always in the tree, toggled via
-                          // opacity rather than conditionally rendered, so showing/
-                          // hiding it doesn't change the Stack's child structure
-                          // (which re-laid-out the ListView and made the content
-                          // "jolt" each time the button appeared).
-                          Positioned(
-                            right: 12,
-                            bottom: 8,
-                            child: IgnorePointer(
-                              ignoring: !_showJumpButton,
-                              child: AnimatedOpacity(
-                                duration:
-                                    const Duration(milliseconds: 150),
-                                curve: Curves.easeOut,
-                                opacity: _showJumpButton ? 1 : 0,
-                                child: _JumpToBottomButton(
-                                  onTap: _jumpToBottom,
+                    : NotificationListener<UserScrollNotification>(
+                        onNotification: _onUserScroll,
+                        child: Stack(
+                          children: [
+                            _TurnList(controller: _scroll),
+                            // Jump-to-bottom button: always in the tree, toggled via
+                            // opacity rather than conditionally rendered, so showing/
+                            // hiding it doesn't change the Stack's child structure
+                            // (which re-laid-out the ListView and made the content
+                            // "jolt" each time the button appeared).
+                            Positioned(
+                              right: 12,
+                              bottom: 8,
+                              child: IgnorePointer(
+                                ignoring: !_showJumpButton,
+                                child: AnimatedOpacity(
+                                  duration:
+                                      const Duration(milliseconds: 150),
+                                  curve: Curves.easeOut,
+                                  opacity: _showJumpButton ? 1 : 0,
+                                  child: _JumpToBottomButton(
+                                    onTap: _jumpToBottom,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
               ),
             ],
