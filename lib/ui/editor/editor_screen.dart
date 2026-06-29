@@ -53,12 +53,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         ),
         title: _chapterSwitch(editor),
         actions: [
-          // Manually add a new chapter (mirrors the agent's add_chapter tool).
-          IconButton(
-            icon: const Icon(Icons.post_add),
-            tooltip: '新增章节',
-            onPressed: () => _promptNewChapter(context),
-          ),
           // Right-swipe affordance -> novel settings.
           IconButton(
             icon: const Icon(Icons.tune),

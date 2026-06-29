@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:animated_streaming_markdown/animated_streaming_markdown.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -12,21 +11,28 @@ import 'ref_badge.dart';
 ///  - CoT (reasoning_content) is collapsible, collapsed by default.
 ///  - Tool calls are collapsible, collapsed by default, expandable to show
 ///    arguments + result.
-/// Per-message edit/retry/copy actions live on the turn cluster's action bar
-/// (rendered in agent_pane), NOT here.
+/// Per-message action chips (copy / edit / retry / delete for user messages;
+/// copy / retry / revert for assistant messages) live directly under each
+/// bubble, passed in from the turn cluster.
 class MessageTile extends StatefulWidget {
   final Message message;
   final bool streaming;
-  // For user messages: long-press menu actions. Null disables the menu.
-  // `onRetry` regenerates the assistant reply to this user message.
+  // Per-message action chips. Null = hide that chip (e.g. disabled while
+  // running). When all are null the action row is omitted entirely.
   final VoidCallback? onRetry;
   final VoidCallback? onCopy;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+  final VoidCallback? onRevert;
   const MessageTile({
     super.key,
     required this.message,
     this.streaming = false,
     this.onRetry,
     this.onCopy,
+    this.onEdit,
+    this.onDelete,
+    this.onRevert,
   });
 
   @override
@@ -91,9 +97,6 @@ class _MessageTileState extends State<MessageTile>
         isUser ? scheme.primary : scheme.surfaceContainerHigh;
     final fgColor = isUser ? scheme.onPrimary : scheme.onSurface;
 
-    // User bubbles support a long-press context menu (regenerate reply / copy).
-    final hasMenu = isUser && (widget.onRetry != null || widget.onCopy != null);
-
     Widget bubble = Container(
       constraints: const BoxConstraints(maxWidth: 560),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -146,62 +149,123 @@ class _MessageTileState extends State<MessageTile>
       ),
     );
 
-    if (hasMenu) {
-      bubble = GestureDetector(
-        onLongPress: () => _showUserMenu(context),
-        child: bubble,
-      );
+    // Per-message action chips. Build only the chips that have a callback;
+    // if none, the row is omitted entirely.
+    final actions = <_ActionChipData>[];
+    if (widget.onCopy != null) {
+      actions.add(_ActionChipData(Icons.copy_outlined, '复制', widget.onCopy!));
+    }
+    if (widget.onEdit != null) {
+      actions.add(_ActionChipData(Icons.edit_outlined, '编辑', widget.onEdit!));
+    }
+    if (widget.onRetry != null) {
+      actions.add(_ActionChipData(Icons.refresh, '重试', widget.onRetry!));
+    }
+    if (widget.onRevert != null) {
+      actions.add(_ActionChipData(Icons.undo, '撤回', widget.onRevert!));
+    }
+    if (widget.onDelete != null) {
+      actions.add(_ActionChipData(Icons.delete_outline, '删除', widget.onDelete!));
     }
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: bubble,
+        child: Column(
+          crossAxisAlignment:
+              isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            bubble,
+            if (actions.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: _MessageActionBar(
+                  actions: actions,
+                  rightAlign: isUser,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
-
-  void _showUserMenu(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    showMenu<String>(
-      context: context,
-      // Position the menu near the bubble's right edge (user bubbles are
-      // right-aligned).
-      position: RelativeRect.fromLTRB(
-        MediaQuery.sizeOf(context).width,
-        0,
-        16,
-        MediaQuery.sizeOf(context).height,
-      ),
-      color: scheme.surfaceContainerHigh,
-      items: [
-        if (widget.onRetry != null)
-          const PopupMenuItem(value: 'retry', child: _MenuRow(icon: Icons.refresh, label: '重新生成')),
-        if (widget.onCopy != null)
-          const PopupMenuItem(value: 'copy', child: _MenuRow(icon: Icons.copy, label: '复制')),
-      ],
-    ).then((v) {
-      if (v == 'retry') widget.onRetry?.call();
-      if (v == 'copy') widget.onCopy?.call();
-    });
-  }
 }
 
-/// A single icon+label row for a popup menu.
-class _MenuRow extends StatelessWidget {
+/// Data for one per-message action chip.
+class _ActionChipData {
   final IconData icon;
   final String label;
-  const _MenuRow({required this.icon, required this.label});
+  final VoidCallback onTap;
+  const _ActionChipData(this.icon, this.label, this.onTap);
+}
+
+/// A row of small action chips shown beneath a message bubble.
+class _MessageActionBar extends StatefulWidget {
+  final List<_ActionChipData> actions;
+  final bool rightAlign;
+  const _MessageActionBar(
+      {required this.actions, required this.rightAlign});
+
+  @override
+  State<_MessageActionBar> createState() => _MessageActionBarState();
+}
+
+class _MessageActionBarState extends State<_MessageActionBar> {
+  // Track per-chip "copied"-style feedback by label.
+  String? _feedbackFor;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment:
+          widget.rightAlign ? MainAxisAlignment.end : MainAxisAlignment.start,
       children: [
-        Icon(icon, size: 16, color: scheme.onSurfaceVariant),
-        const SizedBox(width: 8),
-        Text(label, style: TextStyle(color: scheme.onSurface)),
+        for (var i = 0; i < widget.actions.length; i++) ...[
+          if (i > 0) const SizedBox(width: 2),
+          _buildChip(widget.actions[i], scheme),
+        ],
       ],
+    );
+  }
+
+  Widget _buildChip(_ActionChipData a, ColorScheme scheme) {
+    final feedback = _feedbackFor == a.label;
+    final label = feedback ? '已复制' : a.label;
+    return Tooltip(
+      message: a.label,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: () {
+          a.onTap();
+          if (a.icon == Icons.copy_outlined) {
+            setState(() => _feedbackFor = a.label);
+            Future.delayed(const Duration(seconds: 2), () {
+              if (mounted) setState(() => _feedbackFor = null);
+            });
+          }
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                feedback ? Icons.check : a.icon,
+                size: 13,
+                color: scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 3),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 11, color: scheme.onSurfaceVariant)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -988,46 +1052,6 @@ class _MarkdownContentState extends State<_MarkdownContent> {
             ? AnimatedMarkdownTokenCompaction.automatic
             : AnimatedMarkdownTokenCompaction.always,
         showCodeBlockCopyButton: true,
-      ),
-    );
-  }
-}
-
-/// A small "copy" button shown beneath assistant markdown content.
-class _CopyButton extends StatefulWidget {
-  final String text;
-  const _CopyButton({required this.text});
-
-  @override
-  State<_CopyButton> createState() => _CopyButtonState();
-}
-
-class _CopyButtonState extends State<_CopyButton> {
-  bool _copied = false;
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      borderRadius: BorderRadius.circular(6),
-      onTap: () async {
-        await Clipboard.setData(ClipboardData(text: widget.text));
-        setState(() => _copied = true);
-        Future.delayed(const Duration(seconds: 2),
-            () => mounted ? setState(() => _copied = false) : null);
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_copied ? Icons.check : Icons.copy, size: 13,
-                color: scheme.onSurfaceVariant),
-            const SizedBox(width: 3),
-            Text(_copied ? '已复制' : '复制',
-                style: TextStyle(
-                    fontSize: 11, color: scheme.onSurfaceVariant)),
-          ],
-        ),
       ),
     );
   }

@@ -537,8 +537,6 @@ class _TurnList extends ConsumerWidget {
         ref.watch(editorStateProvider.select((s) => s.streamingMessages));
     final agentRunning =
         ref.watch(editorStateProvider.select((s) => s.agentRunning));
-    final editingTurnId =
-        ref.watch(editorStateProvider.select((s) => s.editingMessageId));
 
     final streamingActive = streaming.isNotEmpty &&
         agentRunning &&
@@ -567,20 +565,10 @@ class _TurnList extends ConsumerWidget {
         return _TurnCluster(
           messages: msgs,
           streaming: thisTurnStreaming,
-          showActions: !thisTurnStreaming,
-          editingThisTurn: editingTurnId != null &&
-              msgs.any((m) => m.id == editingTurnId),
           onRetry: () => notifier.retryTurn(turnId),
           onDelete: () => notifier.deleteTurn(turnId),
           onRevert: () => notifier.revertTurn(turnId),
           onEdit: () => notifier.editTurn(turnId),
-          onCopy: () {
-            final assistantText = msgs
-                .where((m) => m.role == MessageRole.assistant)
-                .map((m) => m.content)
-                .join('\n\n');
-            Clipboard.setData(ClipboardData(text: assistantText));
-          },
         );
       },
     );
@@ -588,27 +576,21 @@ class _TurnList extends ConsumerWidget {
 }
 
 /// One turn cluster: the user message bubble + its assistant/tool replies,
-/// followed by a shared action bar (right-aligned mini buttons).
+/// each carrying its own per-message action chips (no separate action bar).
 class _TurnCluster extends ConsumerWidget {
   final List<Message> messages;
   final bool streaming;
-  final bool showActions;
-  final bool editingThisTurn;
   final VoidCallback onRetry;
   final VoidCallback onDelete;
   final VoidCallback onRevert;
   final VoidCallback onEdit;
-  final VoidCallback onCopy;
   const _TurnCluster({
     required this.messages,
     required this.streaming,
-    required this.showActions,
-    required this.editingThisTurn,
     required this.onRetry,
     required this.onDelete,
     required this.onRevert,
     required this.onEdit,
-    required this.onCopy,
   });
 
   @override
@@ -632,11 +614,16 @@ class _TurnCluster extends ConsumerWidget {
       // Assistant message: the model emits text first, then any tool calls, so
       // render the bubble first and the tool-call blocks after it. Tool result
       // messages in between are skipped above.
+      final isLastAssistant = m.role == MessageRole.assistant &&
+          i == messages.lastIndexWhere((x) => x.role == MessageRole.assistant);
       children.add(MessageTile(
         key: ValueKey(m.id),
         message: m,
         streaming: streaming && i == messages.length - 1,
-        onRetry: m.role == MessageRole.user ? onRetry : null,
+        // User messages: copy / edit / retry / delete.
+        // Assistant messages: copy / retry / revert.
+        // Only the final assistant message in a turn carries the chips;
+        // earlier assistant fragments (rare) stay bare.
         onCopy: m.role == MessageRole.user
             ? () {
                 // Render ref tokens as their readable label instead of raw
@@ -648,7 +635,22 @@ class _TurnCluster extends ConsumerWidget {
                     .join();
                 Clipboard.setData(ClipboardData(text: text));
               }
+            : (m.role == MessageRole.assistant && isLastAssistant
+                ? () {
+                    final text = m.content;
+                    Clipboard.setData(ClipboardData(text: text));
+                  }
+                : null),
+        // Mutating actions are disabled while the agent is running (mirrors the
+        // old shared action bar's `running` guard).
+        onEdit: !running && m.role == MessageRole.user ? onEdit : null,
+        onRetry: !running && (m.role == MessageRole.user || isLastAssistant)
+            ? onRetry
             : null,
+        onRevert: !running && m.role == MessageRole.assistant && isLastAssistant
+            ? onRevert
+            : null,
+        onDelete: !running && m.role == MessageRole.user ? onDelete : null,
       ));
       if (m.role == MessageRole.assistant) {
         // ask_user only becomes interactive once the loop has actually paused
@@ -705,83 +707,11 @@ class _TurnCluster extends ConsumerWidget {
         }
       }
     }
-    if (showActions) {
-      children.add(_TurnActionBar(
-        running: running,
-        editing: editingThisTurn,
-        onRetry: onRetry,
-        onDelete: onDelete,
-        onRevert: onRevert,
-        onEdit: onEdit,
-        onCopy: onCopy,
-      ));
-    }
-
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: children,
-      ),
-    );
-  }
-}
-
-/// Right-aligned mini icon buttons shared by a whole turn.
-class _TurnActionBar extends ConsumerWidget {
-  final bool running;
-  final bool editing;
-  final VoidCallback onRetry;
-  final VoidCallback onDelete;
-  final VoidCallback onRevert;
-  final VoidCallback onEdit;
-  final VoidCallback onCopy;
-  const _TurnActionBar({
-    required this.running,
-    required this.editing,
-    required this.onRetry,
-    required this.onDelete,
-    required this.onRevert,
-    required this.onEdit,
-    required this.onCopy,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    Widget btn(IconData icon, String tip, VoidCallback? onTap,
-            {Color? color}) =>
-        Tooltip(
-          message: tip,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: running ? null : onTap,
-            child: Padding(
-              padding: const EdgeInsets.all(5),
-              child: Icon(icon, size: 15, color: color ?? scheme.onSurfaceVariant),
-            ),
-          ),
-        );
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.start,
-        children: [
-          btn(Icons.content_copy, '复制回复', onCopy),
-          const SizedBox(width: 2),
-          editing
-              ? btn(Icons.close, '取消编辑',
-                  () => ref.read(editorStateProvider.notifier).clearDraft(),
-                  color: scheme.primary)
-              : btn(Icons.edit_outlined, '编辑', onEdit),
-          const SizedBox(width: 2),
-          btn(Icons.refresh, '重试', onRetry),
-          const SizedBox(width: 2),
-          btn(Icons.undo, '撤回', onRevert),
-          const SizedBox(width: 2),
-          btn(Icons.delete_outline, '删除', onDelete),
-        ],
       ),
     );
   }
