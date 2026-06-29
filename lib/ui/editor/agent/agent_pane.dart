@@ -59,8 +59,12 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
   bool _autoScroll = true;
   bool _showJumpButton = false;
-  // Last user-driven scroll offset, used to tell an upward flick from growth.
-  double _lastUserPixels = double.infinity;
+  // True while a finger (or mouse button) is held down over the message list.
+  // While touching, streaming auto-scroll is suspended so the user can scroll up
+  // to read history without the per-frame jumpTo fighting the finger. Released
+  // on pointer up; if the user had scrolled back to the bottom, the hysteresis
+  // in [_onScroll] re-enables [_autoScroll] automatically.
+  bool _touching = false;
   // Keys used to measure the header / composer height so EditorScreen can
   // clamp the panel's drag range (header-only floor, header+composer band).
   final _headerKey = GlobalKey();
@@ -98,42 +102,50 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
       _autoScroll = atBottom;
       setState(() => _showJumpButton = !atBottom);
     }
-    // Keep the baseline current so the next upward flick registers cleanly
-    // (programmatic jumpTo also routes through here with distance≈0, which we
-    // don't want to read as a user scroll-up).
-    _lastUserPixels = pos.pixels;
   }
 
-  /// A *user* dragged the message list (as opposed to a programmatic jumpTo).
-  /// UserScrollNotification is emitted only by real gestures — the per-frame
-  /// jumpTo during streaming does NOT produce it — so this is the reliable way
-  /// to tell "the user is reading history" from "content grew". Dragging toward
-  /// the top of the list (pixels decreasing vs. the last user-driven position)
-  /// suspends auto-scroll; the hysteresis in [_onScroll] re-enables it once the
-  /// user scrolls back to the bottom. This is necessary because jumpTo itself
-  /// fires [_onScroll] with distance≈0, which would otherwise keep _autoScroll
-  /// pinned to true forever and swallow every upward flick.
-  bool _onUserScroll(UserScrollNotification n) {
-    final p = n.metrics.pixels;
-    if (p < _lastUserPixels && _autoScroll) {
-      _autoScroll = false;
-      if (mounted) setState(() => _showJumpButton = true);
+  /// A pointer went down over the message list → the user is (about to) scroll.
+  /// Suspend streaming auto-scroll while held, so the per-frame jumpTo can't
+  /// yank the list back to the bottom mid-drag.
+  void _onPointerDown(PointerDownEvent _) {
+    if (!_touching) {
+      _touching = true;
+      if (_autoScroll) {
+        _autoScroll = false;
+        if (mounted) setState(() => _showJumpButton = true);
+      }
     }
-    _lastUserPixels = p;
-    return false;
+  }
+
+  /// Pointer released or cancelled → re-check whether the list is back at the
+  /// bottom; if so, the hysteresis in [_onScroll] re-enables auto-scroll. Either
+  /// way, stop holding the "touching" gate so streaming auto-scroll can resume
+  /// once the user is pinned to the bottom again.
+  void _onPointerUp(PointerEvent _) {
+    _touching = false;
+    // Re-evaluate pinned-to-bottom now that the finger is gone.
+    if (_scroll.hasClients) {
+      final distance = _scroll.position.maxScrollExtent - _scroll.position.pixels;
+      final atBottom = distance < 32;
+      if (atBottom != _autoScroll) {
+        _autoScroll = atBottom;
+        if (mounted) setState(() => _showJumpButton = !atBottom);
+      }
+    }
   }
 
   /// Streaming-time auto-scroll: while the user is pinned to the bottom, jump
   /// to the bottom immediately after each content/layout growth so new content
   /// grows upward with the bottom edge always in view — no visible "write past
   /// the bottom then animate to catch up" effect. The user's scroll-up is still
-  /// respected (the hysteresis in [_onScroll] flips [_autoScroll] off). No
-  /// animation while streaming pinned; the smooth [animateTo] is reserved for
-  /// the manual jump-to-bottom button ([_jumpToBottom]).
+  /// respected — if a finger is held down over the list (the user is reading /
+  /// scrolling), auto-scroll is suspended until release so the per-frame jumpTo
+  /// doesn't fight the finger. No animation while streaming pinned; the smooth
+  /// [animateTo] is reserved for the manual jump-to-bottom button.
   void _maybeAutoScroll() {
-    if (!_autoScroll || !_scroll.hasClients) return;
+    if (!_autoScroll || !_scroll.hasClients || _touching) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients || !_autoScroll) return;
+      if (!mounted || !_scroll.hasClients || !_autoScroll || _touching) return;
       // jumpTo (not animateTo) so the bottom stays pinned frame-by-frame as
       // maxScrollExtent grows during streaming.
       _scroll.jumpTo(_scroll.position.maxScrollExtent);
@@ -357,7 +369,10 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
               clipBehavior: Clip.hardEdge,
               children: [
                 // Messages (or the empty placeholder), padded at the bottom so
-                // the last item clears the pinned composer.
+                // the last item clears the pinned composer. Wrapped in a
+                // Listener so a touch-down immediately suspends streaming
+                // auto-scroll (a pointer event is the earliest, most reliable
+                // signal that the user wants to read/scroll history).
                 Positioned.fill(
                   child: messages.isEmpty && streaming.isEmpty
                       ? Center(
@@ -366,8 +381,10 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                             style: TextStyle(color: scheme.onSurfaceVariant),
                           ),
                         )
-                      : NotificationListener<UserScrollNotification>(
-                          onNotification: _onUserScroll,
+                      : Listener(
+                          onPointerDown: _onPointerDown,
+                          onPointerUp: _onPointerUp,
+                          onPointerCancel: _onPointerUp,
                           child: _TurnList(
                             controller: _scroll,
                             bottomPadding: composerH + 8,
