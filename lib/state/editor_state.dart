@@ -216,6 +216,28 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     state = state.copyWith(selectedParagraphIds: sel);
   }
 
+  /// Select (or deselect) every paragraph whose index falls within
+  /// [fromIndex, toIndex] (inclusive, order-independent). Used by the
+  /// drag-to-range gesture on the numbered gutter.
+  void selectParagraphRange(int fromIndex, int toIndex,
+      {required bool select}) {
+    final paras = state.chapter.paragraphs;
+    if (paras.isEmpty) return;
+    final lo = fromIndex <= toIndex ? fromIndex : toIndex;
+    final hi = fromIndex <= toIndex ? toIndex : fromIndex;
+    final sel = {...state.selectedParagraphIds};
+    for (var i = lo; i <= hi; i++) {
+      if (i < 0 || i >= paras.length) continue;
+      final id = paras[i].id;
+      if (select) {
+        sel.add(id);
+      } else {
+        sel.remove(id);
+      }
+    }
+    state = state.copyWith(selectedParagraphIds: sel);
+  }
+
   void clearSelection() =>
       state = state.copyWith(selectedParagraphIds: {});
 
