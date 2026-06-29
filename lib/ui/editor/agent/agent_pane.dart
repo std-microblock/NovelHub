@@ -766,7 +766,7 @@ class _TurnActionBar extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
+        mainAxisAlignment: MainAxisAlignment.start,
         children: [
           btn(Icons.content_copy, '复制回复', onCopy),
           const SizedBox(width: 2),
