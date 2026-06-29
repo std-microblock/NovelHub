@@ -3,6 +3,8 @@
 /// to stay build_runner-free.
 library;
 
+import 'dart:io' show Platform;
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/llm/llm_client.dart';
@@ -120,7 +122,13 @@ extension SendBehaviorX on SendBehavior {
       };
   static SendBehavior fromName(String? s) => switch (s) {
         'ctrlEnter' => SendBehavior.ctrlEnterToSend,
-        _ => SendBehavior.enterToSend,
+        'enter' => SendBehavior.enterToSend,
+        // null / first-run: desktop keeps the desktop-friendly default
+        // (Enter sends); Android defaults to Ctrl+Enter so the on-screen
+        // keyboard's Enter inserts a newline instead of firing send.
+        _ => Platform.isAndroid || Platform.isIOS
+            ? SendBehavior.ctrlEnterToSend
+            : SendBehavior.enterToSend,
       };
   String get name => switch (this) {
         SendBehavior.enterToSend => 'enter',
@@ -153,9 +161,12 @@ class PrefsNotifier extends StateNotifier<Map<String, dynamic>> {
   set sendBehavior(SendBehavior v) => set('sendBehavior', v.name);
 }
 
-/// Convenience accessor for the send behavior.
-final sendBehaviorProvider = Provider<SendBehavior>(
-    (ref) => ref.watch(prefsProvider.notifier).sendBehavior);
+final sendBehaviorProvider = Provider<SendBehavior>((ref) {
+  // Reading the state element forces this provider to depend on prefs state
+  // changes; notifier.sendBehavior just reads the current value.
+  ref.watch(prefsProvider);
+  return ref.read(prefsProvider.notifier).sendBehavior;
+});
 
 // --- Novels ---
 
