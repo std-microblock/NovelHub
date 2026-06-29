@@ -44,6 +44,13 @@ class _MessageTileState extends State<MessageTile>
         widget.message.reasoningContent.isNotEmpty &&
         !_cotExpanded) {
       _cotExpanded = true;
+    } else if (!_cotUserToggled &&
+        !widget.streaming &&
+        oldWidget.streaming &&
+        _cotExpanded) {
+      // Streaming just ended → auto-collapse the CoT back, unless the user
+      // manually expanded it during the stream.
+      _cotExpanded = false;
     }
   }
 
@@ -100,6 +107,12 @@ class _MessageTileState extends State<MessageTile>
                 isUser
                     ? _RichUserContent(content: m.content, fgColor: fgColor)
                     : _MarkdownContent(
+                        // Key by streaming state so the widget fully remounts
+                        // when streaming flips to false (turn ends), instead of
+                        // toggling enableSelection in place — which raced the
+                        // SelectionContainer layout. Streaming: animation on,
+                        // selection off. Settled: static render, selection on.
+                        key: ValueKey('md_${m.id}_${widget.streaming}'),
                         data: m.content,
                         fgColor: fgColor,
                         theme: Theme.of(context),
@@ -714,6 +727,7 @@ class _MarkdownContent extends StatefulWidget {
   final ThemeData theme;
   final bool streaming;
   const _MarkdownContent({
+    super.key,
     required this.data,
     required this.fgColor,
     required this.theme,
@@ -739,6 +753,55 @@ class _MarkdownContentState extends State<_MarkdownContent> {
   Timer? _pumpTimer;
   bool _pumpScheduled = false;
   static const _pumpInterval = Duration(milliseconds: 40);
+
+  // Cached theme. The package folds `markdownTheme.hashCode` (identity-based)
+  // into each block's signature, so rebuilding the theme object every frame
+  // would invalidate *every* block's signature and force a full re-render
+  // every delta — the main source of the "everything re-renders" lag. Rebuild
+  // it only when fgColor / theme actually change.
+  StreamingMarkdownThemeData? _theme;
+  Color? _themeFg;
+  Brightness? _themeBrightness;
+
+  StreamingMarkdownThemeData _resolveTheme() {
+    final fg = widget.fgColor;
+    final brightness = widget.theme.brightness;
+    if (_theme != null && _themeFg == fg && _themeBrightness == brightness) {
+      return _theme!;
+    }
+    final codeBg = brightness == Brightness.dark
+        ? Colors.black.withValues(alpha: 0.35)
+        : Colors.black.withValues(alpha: 0.06);
+    final codeFg = brightness == Brightness.dark
+        ? Colors.green.shade200
+        : const Color(0xFF8E2DE2);
+    _theme = StreamingMarkdownThemeData(
+      blockSpacing: 8,
+      paragraphTextStyle:
+          TextStyle(color: fg, height: 1.5, fontSize: 14),
+      linkTextStyle: TextStyle(color: widget.theme.colorScheme.primary),
+      inlineCodeTextStyle: TextStyle(
+        backgroundColor: codeBg,
+        color: codeFg,
+        fontFamily: "monospace",
+        fontSize: 13,
+        height: 1.4,
+      ),
+      inlineCodeBackgroundColor: codeBg,
+      codeBlockBackgroundColor: codeBg,
+      codeBlockTextStyle: TextStyle(
+        color: codeFg,
+        fontFamily: "monospace",
+        fontSize: 13,
+        height: 1.4,
+      ),
+      quoteBackgroundColor: fg.withValues(alpha: 0.06),
+      thematicBreakColor: fg.withValues(alpha: 0.3),
+    );
+    _themeFg = fg;
+    _themeBrightness = brightness;
+    return _theme!;
+  }
 
   @override
   void initState() {
@@ -823,53 +886,34 @@ class _MarkdownContentState extends State<_MarkdownContent> {
 
   @override
   Widget build(BuildContext context) {
-    final brightness = widget.theme.brightness;
-    final codeBg = brightness == Brightness.dark
-        ? Colors.black.withValues(alpha: 0.35)
-        : Colors.black.withValues(alpha: 0.06);
-    final codeFg = brightness == Brightness.dark
-        ? Colors.green.shade200
-        : const Color(0xFF8E2DE2);
-    final theme = StreamingMarkdownThemeData(
-      blockSpacing: 8,
-      paragraphTextStyle:
-          TextStyle(color: widget.fgColor, height: 1.5, fontSize: 14),
-      linkTextStyle: TextStyle(color: widget.theme.colorScheme.primary),
-      inlineCodeTextStyle: TextStyle(
-        backgroundColor: codeBg,
-        color: codeFg,
-        fontFamily: "monospace",
-        fontSize: 13,
-        height: 1.4,
-      ),
-      inlineCodeBackgroundColor: codeBg,
-      codeBlockBackgroundColor: codeBg,
-      codeBlockTextStyle: TextStyle(
-        color: codeFg,
-        fontFamily: "monospace",
-        fontSize: 13,
-        height: 1.4,
-      ),
-      quoteBackgroundColor: widget.fgColor.withValues(alpha: 0.06),
-      thematicBreakColor: widget.fgColor.withValues(alpha: 0.3),
-    );
+    final theme = _resolveTheme();
+    final streaming = widget.streaming;
     // RepaintBoundary isolates the streaming markdown's per-frame repaints
     // from the rest of the message list.
     return RepaintBoundary(
       child: AnimatedStreamingMarkdown(
         blocks: _blocks,
         theme: theme,
-        enableSelection: true,
+        // Selection is off while streaming: the package recomputes its
+        // selection projection (O(n) over the whole doc) on every block
+        // change, and the progressive inline-proxy mounting races the
+        // SelectionContainer's layout scheduler. Once the turn ends the
+        // whole widget remounts (see the ValueKey in MessageTile) as a
+        // settled static view with selection re-enabled.
+        enableSelection: !streaming,
         allowIncompleteInlineSyntax: true,
-        // Animation fully off. With any non-zero token animation, every
-        // throttled flush hands the widget a fresh blocks list and the
-        // per-block reveal scheduler re-evaluates → flicker while streaming,
-        // and a flash/jump when a block scrolls out of and back into the
-        // viewport. Duration.zero + always-compact makes rendering purely
-        // static: blocks appear immediately, no fade, no rescheduling.
-        tokenStaggerDelay: Duration.zero,
-        tokenAnimationDuration: Duration.zero,
-        tokenCompaction: AnimatedMarkdownTokenCompaction.always,
+        // Token-by-token fade-in *only while streaming*. For settled /
+        // historical messages we render fully static (duration zero +
+        // always-compact) so re-entering the view doesn't replay an
+        // animation on already-complete content.
+        tokenStaggerDelay:
+            streaming ? const Duration(milliseconds: 12) : Duration.zero,
+        tokenAnimationDuration:
+            streaming ? const Duration(milliseconds: 220) : Duration.zero,
+        tokenAnimationCurve: Curves.easeOut,
+        tokenCompaction: streaming
+            ? AnimatedMarkdownTokenCompaction.automatic
+            : AnimatedMarkdownTokenCompaction.always,
         showCodeBlockCopyButton: true,
       ),
     );

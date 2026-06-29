@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,6 +28,11 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
   bool _autoScroll = true;
   bool _showJumpButton = false;
+  // Coalesce streaming auto-scroll requests: each token delta rebuilds the
+  // pane, but we only want one smooth animateTo per frame-window, not a
+  // jumpTo on every chunk (which caused the visible "jolt" as maxScrollExtent
+  // kept growing).
+  Timer? _autoscrollTimer;
 
   @override
   void initState() {
@@ -35,6 +42,7 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
 
   @override
   void dispose() {
+    _autoscrollTimer?.cancel();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
@@ -45,31 +53,40 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   /// floating "jump to bottom" button re-enables it.
   ///
   /// Uses hysteresis (two thresholds) so the jump-button / auto-scroll flag
-  /// doesn't thrash on/off when the user idles near the boundary — that
-  /// thrash was the source of the "flicker when scrolling up" bug.
+  /// doesn't thrash on/off when the user idles near the boundary.
+  ///
+  /// The jump button's visibility is derived purely from `_autoScroll` (shown
+  /// when not at bottom), so a single state flip drives it — no separate
+  /// `_showJumpButton` recomputation that could flip per-scroll-event.
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final pos = _scroll.position;
     final distance = pos.maxScrollExtent - pos.pixels;
     final bool atBottom = _autoScroll ? distance < 96 : distance < 32;
-    final bool showButton = !_autoScroll;
-    bool changed = false;
     if (atBottom != _autoScroll) {
       _autoScroll = atBottom;
-      _showJumpButton = !atBottom;
-      changed = true;
-    } else if (showButton != _showJumpButton) {
-      _showJumpButton = showButton;
-      changed = true;
+      setState(() => _showJumpButton = !atBottom);
     }
-    if (changed) setState(() {});
   }
 
-  void _scrollToBottom() {
-    if (!_autoScroll) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients || !_autoScroll) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+  /// Streaming-time auto-scroll: only when the user is already pinned to the
+  /// bottom, and debounced so many rapid deltas coalesce into one smooth
+  /// animateTo instead of a jumpTo-per-chunk.
+  void _maybeAutoScroll() {
+    if (!_autoScroll || !_scroll.hasClients) return;
+    _autoscrollTimer?.cancel();
+    _autoscrollTimer = Timer(const Duration(milliseconds: 60), () {
+      if (!mounted || !_scroll.hasClients || !_autoScroll) return;
+      final pos = _scroll.position;
+      final distance = pos.maxScrollExtent - pos.pixels;
+      // Only chase the bottom if we're already close; if the user has scrolled
+      // up (beyond the hysteresis band), respect that and don't yank them down.
+      if (distance > 220) return;
+      _scroll.animateTo(
+        pos.maxScrollExtent,
+        duration: const Duration(milliseconds: 140),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -121,7 +138,7 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
     // Only auto-scroll while the agent is actively streaming new content.
     // Doing this on every rebuild (incl. typing in the composer, which also
     // rebuilds this pane) caused the list to jump on every keystroke.
-    if (streamingActive) _scrollToBottom();
+    if (streamingActive) _maybeAutoScroll();
 
     final scheme = Theme.of(context).colorScheme;
 
@@ -216,12 +233,7 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                   )
                 : Stack(
                     children: [
-                      _TurnList(
-                        controller: _scroll,
-                        committed: messages,
-                        streaming: streaming,
-                        streamingActive: streamingActive,
-                      ),
+                      _TurnList(controller: _scroll),
                       // Jump-to-bottom button: always in the tree, toggled via
                       // opacity rather than conditionally rendered, so showing/
                       // hiding it doesn't change the Stack's child structure
@@ -510,21 +522,30 @@ class _ComposerState extends ConsumerState<_Composer> {
 
 class _TurnList extends ConsumerWidget {
   final ScrollController controller;
-  final List<Message> committed;
-  final List<Message> streaming;
-  final bool streamingActive;
-  const _TurnList({
-    required this.controller,
-    required this.committed,
-    required this.streaming,
-    required this.streamingActive,
-  });
+  const _TurnList({required this.controller});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final notifier = ref.read(editorStateProvider.notifier);
+    // Watch only the slices this list actually depends on, so a draft edit
+    // (which changes EditorState.draftContent and rebuilds the pane above)
+    // does NOT rebuild the whole message list.
+    final committed = ref.watch(
+        editorStateProvider.select((s) => s.conversation.messages));
+    final streaming =
+        ref.watch(editorStateProvider.select((s) => s.streamingMessages));
+    final agentRunning =
+        ref.watch(editorStateProvider.select((s) => s.agentRunning));
     final editingTurnId =
-        ref.watch(editorStateProvider).editingMessageId;
+        ref.watch(editorStateProvider.select((s) => s.editingMessageId));
+
+    final streamingActive = streaming.isNotEmpty &&
+        agentRunning &&
+        streaming.last.role == MessageRole.assistant;
+    final isStreaming = streamingActive && streaming.isNotEmpty;
+    final streamingTurnId = streaming.isNotEmpty
+        ? streaming.first.turnId
+        : null;
 
     // Build ordered list of clusters preserving insertion order.
     final order = <String>[];
@@ -533,11 +554,6 @@ class _TurnList extends ConsumerWidget {
       (byTurn[m.turnId] ??= []).add(m);
       if (!order.contains(m.turnId)) order.add(m.turnId);
     }
-
-    final isStreaming = streamingActive && streaming.isNotEmpty;
-    final streamingTurnId = streaming.isNotEmpty
-        ? streaming.first.turnId
-        : null;
 
     return ListView.builder(
       controller: controller,
@@ -596,7 +612,8 @@ class _TurnCluster extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final running = ref.watch(editorStateProvider).agentRunning;
+    final running =
+        ref.watch(editorStateProvider.select((s) => s.agentRunning));
     // Build a map of toolCallId -> result content for pairing.
     final resultByToolCall = <String, String>{};
     for (final m in messages) {
