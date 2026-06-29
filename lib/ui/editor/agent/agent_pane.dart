@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,7 +17,28 @@ import 'rich_text_controller.dart';
 /// Enter / Ctrl+Enter send behavior is configurable in settings.
 class AgentPane extends ConsumerStatefulWidget {
   final EditorState editor;
-  const AgentPane({super.key, required this.editor});
+  /// Current panel height (portrait). `double.infinity` in landscape / unset.
+  final double panelHeight;
+  /// Measured minimum = header + composer. The drag clamp in EditorScreen
+  /// stops here so the panel can collapse to exactly header + input box.
+  final double minPanelHeight;
+  /// Position-based drag callbacks — the same ones the strip handle uses.
+  /// Wired to the "Agent" header row so dragging the title / blank header area
+  /// resizes the panel.
+  final void Function(double startGlobalY)? onDragStart;
+  final void Function(double globalY)? onDragUpdate;
+  /// Reports the measured header + composer height up to EditorScreen so it can
+  /// set its drag clamp to exactly that height.
+  final void Function(double measuredMinH)? onMeasuredMinH;
+  const AgentPane({
+    super.key,
+    required this.editor,
+    this.panelHeight = double.infinity,
+    this.minPanelHeight = 0,
+    this.onDragStart,
+    this.onDragUpdate,
+    this.onMeasuredMinH,
+  });
 
   @override
   ConsumerState<AgentPane> createState() => _AgentPaneState();
@@ -29,11 +48,10 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
   bool _autoScroll = true;
   bool _showJumpButton = false;
-  // Coalesce streaming auto-scroll requests: each token delta rebuilds the
-  // pane, but we only want one smooth animateTo per frame-window, not a
-  // jumpTo on every chunk (which caused the visible "jolt" as maxScrollExtent
-  // kept growing).
-  Timer? _autoscrollTimer;
+  // Keys used to measure the header + composer height so EditorScreen can
+  // clamp the panel's minimum drag height to exactly header + composer.
+  final _headerKey = GlobalKey();
+  final _composerKey = GlobalKey();
 
   @override
   void initState() {
@@ -43,7 +61,6 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
 
   @override
   void dispose() {
-    _autoscrollTimer?.cancel();
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
@@ -70,25 +87,42 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
     }
   }
 
-  /// Streaming-time auto-scroll: only when the user is already pinned to the
-  /// bottom, and debounced so many rapid deltas coalesce into one smooth
-  /// animateTo instead of a jumpTo-per-chunk.
+  /// Streaming-time auto-scroll: while the user is pinned to the bottom, jump
+  /// to the bottom immediately after each content/layout growth so new content
+  /// grows upward with the bottom edge always in view — no visible "write past
+  /// the bottom then animate to catch up" effect. The user's scroll-up is still
+  /// respected (the hysteresis in [_onScroll] flips [_autoScroll] off). No
+  /// animation while streaming pinned; the smooth [animateTo] is reserved for
+  /// the manual jump-to-bottom button ([_jumpToBottom]).
   void _maybeAutoScroll() {
     if (!_autoScroll || !_scroll.hasClients) return;
-    _autoscrollTimer?.cancel();
-    _autoscrollTimer = Timer(const Duration(milliseconds: 60), () {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients || !_autoScroll) return;
-      final pos = _scroll.position;
-      final distance = pos.maxScrollExtent - pos.pixels;
-      // Only chase the bottom if we're already close; if the user has scrolled
-      // up (beyond the hysteresis band), respect that and don't yank them down.
-      if (distance > 220) return;
-      _scroll.animateTo(
-        pos.maxScrollExtent,
-        duration: const Duration(milliseconds: 140),
-        curve: Curves.easeOut,
-      );
+      // jumpTo (not animateTo) so the bottom stays pinned frame-by-frame as
+      // maxScrollExtent grows during streaming.
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
+  }
+
+  /// Measure the actual header + composer height and report it up so
+  /// EditorScreen can clamp the panel's minimum drag height to exactly that.
+  void _measureMinH() {
+    final cb = widget.onMeasuredMinH;
+    if (cb == null) return;
+    final headerCtx = _headerKey.currentContext;
+    final composerCtx = _composerKey.currentContext;
+    if (headerCtx == null || composerCtx == null) return;
+    final headerBox = headerCtx.findRenderObject() as RenderBox?;
+    final composerBox = composerCtx.findRenderObject() as RenderBox?;
+    if (headerBox == null || composerBox == null) return;
+    if (!headerBox.attached || !composerBox.attached) return;
+    if (headerBox.size.isEmpty || composerBox.size.isEmpty) return;
+    cb(headerBox.size.height + composerBox.size.height);
+  }
+
+  void _scheduleMeasureMinH() {
+    if (widget.onMeasuredMinH == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureMinH());
   }
 
   void _jumpToBottom() {
@@ -143,21 +177,56 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
 
     final scheme = Theme.of(context).colorScheme;
 
+    // Collapsed: the panel has been shrunk to (near) its minimum — render only
+    // the header row + composer so the input stays usable and the message list
+    // doesn't show a thin sliver. EditorScreen clamps the drag to stop at
+    // [minPanelHeight] (= header + composer), so this is the resting state at
+    // the minimum drag position. Leave a small buffer (larger when an error
+    // banner is present) so expanding doesn't immediately overflow.
+    final collapseGap = widget.panelHeight - widget.minPanelHeight;
+    final collapsed = collapseGap < (editor.lastError != null ? 100.0 : 48.0);
+
+    // Report the measured header + composer height up to EditorScreen so its
+    // drag clamp can stop at exactly that height (no clipping, no extra gap).
+    _scheduleMeasureMinH();
+
     return Container(
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
       ),
       child: Column(
         children: [
-          // Header.
+          // Header. The leading group (icon + "Agent" title + blank spacer)
+          // forwards the same position-based drag callbacks the strip handle
+          // uses, so dragging the title / empty header area resizes the panel.
+          // The trailing action buttons stay outside the gesture detector so
+          // they remain tappable.
           Padding(
+            key: _headerKey,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Row(
               children: [
-                Icon(Icons.auto_awesome, size: 16, color: scheme.primary),
-                const SizedBox(width: 6),
-                Text('Agent', style: Theme.of(context).textTheme.titleSmall),
-                const Spacer(),
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onVerticalDragStart: widget.onDragStart == null
+                        ? null
+                        : (d) => widget.onDragStart!(d.globalPosition.dy),
+                    onVerticalDragUpdate: widget.onDragUpdate == null
+                        ? null
+                        : (d) => widget.onDragUpdate!(d.globalPosition.dy),
+                    child: Row(
+                      children: [
+                        Icon(Icons.auto_awesome,
+                            size: 16, color: scheme.primary),
+                        const SizedBox(width: 6),
+                        Text('Agent',
+                            style: Theme.of(context).textTheme.titleSmall),
+                        const Spacer(),
+                      ],
+                    ),
+                  ),
+                ),
                 if (editor.editingMessageId != null)
                   TextButton.icon(
                     icon: const Icon(Icons.close, size: 16),
@@ -175,92 +244,100 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
               ],
             ),
           ),
-          // Error banner.
-          if (editor.lastError != null)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.symmetric(horizontal: 12),
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: scheme.errorContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.error_outline,
-                      size: 16, color: scheme.onErrorContainer),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      editor.lastError!,
-                      style: TextStyle(
-                          fontSize: 12, color: scheme.onErrorContainer),
-                      maxLines: 5,
-                      overflow: TextOverflow.ellipsis,
+          // Error banner + message list are omitted when collapsed so the
+          // panel reduces to just header + composer (no thin message sliver).
+          // A Spacer pushes the composer to the bottom so it stays flush with
+          // the panel's bottom edge even when the height is a few px above the
+          // minimum (otherwise the input floats mid-panel with empty space).
+          if (collapsed) const Spacer(),
+          if (!collapsed) ...[
+            if (editor.lastError != null)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline,
+                        size: 16, color: scheme.onErrorContainer),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        editor.lastError!,
+                        style: TextStyle(
+                            fontSize: 12, color: scheme.onErrorContainer),
+                        maxLines: 5,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh, size: 16),
-                    tooltip: '重试',
-                    onPressed: editor.agentRunning
-                        ? null
-                        : () {
-                            final lastUser = messages.lastWhere(
-                              (m) => m.role == MessageRole.user,
-                              orElse: () => Message(
-                                  id: '',
-                                  role: MessageRole.user,
-                                  turnId: '',
-                                  createdAt: 0),
-                            );
-                            if (lastUser.id.isNotEmpty) {
-                              notifier.loadMessageForEdit(lastUser.id);
-                              _send();
-                            }
-                          },
-                  ),
-                ],
-              ),
-            ),
-          const SizedBox(height: 2),
-          // Messages, grouped by turn (user msg + its assistant/tool replies).
-          Expanded(
-            child: messages.isEmpty && streaming.isEmpty
-                ? Center(
-                    child: Text(
-                      '向 Agent 发送消息来开始写作…',
-                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 16),
+                      tooltip: '重试',
+                      onPressed: editor.agentRunning
+                          ? null
+                          : () {
+                              final lastUser = messages.lastWhere(
+                                (m) => m.role == MessageRole.user,
+                                orElse: () => Message(
+                                    id: '',
+                                    role: MessageRole.user,
+                                    turnId: '',
+                                    createdAt: 0),
+                              );
+                              if (lastUser.id.isNotEmpty) {
+                                notifier.loadMessageForEdit(lastUser.id);
+                                _send();
+                              }
+                            },
                     ),
-                  )
-                : Stack(
-                    children: [
-                      _TurnList(controller: _scroll),
-                      // Jump-to-bottom button: always in the tree, toggled via
-                      // opacity rather than conditionally rendered, so showing/
-                      // hiding it doesn't change the Stack's child structure
-                      // (which re-laid-out the ListView and made the content
-                      // "jolt" each time the button appeared).
-                      Positioned(
-                        right: 12,
-                        bottom: 8,
-                        child: IgnorePointer(
-                          ignoring: !_showJumpButton,
-                          child: AnimatedOpacity(
-                            duration:
-                                const Duration(milliseconds: 150),
-                            curve: Curves.easeOut,
-                            opacity: _showJumpButton ? 1 : 0,
-                            child: _JumpToBottomButton(
-                              onTap: _jumpToBottom,
+                  ],
+                ),
+              ),
+            const SizedBox(height: 2),
+            // Messages, grouped by turn (user msg + its assistant/tool replies).
+            Expanded(
+              child: messages.isEmpty && streaming.isEmpty
+                  ? Center(
+                      child: Text(
+                        '向 Agent 发送消息来开始写作…',
+                        style: TextStyle(color: scheme.onSurfaceVariant),
+                      ),
+                    )
+                  : Stack(
+                      children: [
+                        _TurnList(controller: _scroll),
+                        // Jump-to-bottom button: always in the tree, toggled via
+                        // opacity rather than conditionally rendered, so showing/
+                        // hiding it doesn't change the Stack's child structure
+                        // (which re-laid-out the ListView and made the content
+                        // "jolt" each time the button appeared).
+                        Positioned(
+                          right: 12,
+                          bottom: 8,
+                          child: IgnorePointer(
+                            ignoring: !_showJumpButton,
+                            child: AnimatedOpacity(
+                              duration:
+                                  const Duration(milliseconds: 150),
+                              curve: Curves.easeOut,
+                              opacity: _showJumpButton ? 1 : 0,
+                              child: _JumpToBottomButton(
+                                onTap: _jumpToBottom,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-          ),
+                      ],
+                    ),
+            ),
+          ],
           // Composer.
           _Composer(
+            key: _composerKey,
             content: editor.draftContent,
             running: editor.agentRunning,
             editing: editor.editingMessageId != null,
@@ -313,6 +390,7 @@ class _Composer extends ConsumerStatefulWidget {
   final VoidCallback onSend;
   final void Function(String content) onChanged;
   const _Composer({
+    super.key,
     required this.content,
     required this.running,
     required this.editing,

@@ -136,6 +136,32 @@ extension SendBehaviorX on SendBehavior {
       };
 }
 
+/// How the agent panel auto-expands tool-call blocks while streaming.
+enum ToolCallExpandMode { all, editOnly, longRunning, none }
+
+extension ToolCallExpandModeX on ToolCallExpandMode {
+  String get label => switch (this) {
+        ToolCallExpandMode.all => '全部展开',
+        ToolCallExpandMode.editOnly => '只展开编辑相关',
+        ToolCallExpandMode.longRunning => '持续超过0.5s时展开',
+        ToolCallExpandMode.none => '不展开',
+      };
+  static ToolCallExpandMode fromName(String? s) => switch (s) {
+        'all' => ToolCallExpandMode.all,
+        'editOnly' => ToolCallExpandMode.editOnly,
+        'longRunning' => ToolCallExpandMode.longRunning,
+        'none' => ToolCallExpandMode.none,
+        // null / unknown / first-run: default to editOnly.
+        _ => ToolCallExpandMode.editOnly,
+      };
+  String get name => switch (this) {
+        ToolCallExpandMode.all => 'all',
+        ToolCallExpandMode.editOnly => 'editOnly',
+        ToolCallExpandMode.longRunning => 'longRunning',
+        ToolCallExpandMode.none => 'none',
+      };
+}
+
 final prefsProvider =
     StateNotifierProvider<PrefsNotifier, Map<String, dynamic>>((ref) {
   return PrefsNotifier(ref.watch(appRepositoryProvider));
@@ -159,6 +185,14 @@ class PrefsNotifier extends StateNotifier<Map<String, dynamic>> {
   SendBehavior get sendBehavior =>
       SendBehaviorX.fromName(state['sendBehavior'] as String?);
   set sendBehavior(SendBehavior v) => set('sendBehavior', v.name);
+
+  ToolCallExpandMode get toolCallExpandMode =>
+      ToolCallExpandModeX.fromName(state['toolCallExpandMode'] as String?);
+  set toolCallExpandMode(ToolCallExpandMode v) =>
+      set('toolCallExpandMode', v.name);
+
+  bool get cotAutoExpand => state['cotAutoExpand'] as bool? ?? true;
+  set cotAutoExpand(bool v) => set('cotAutoExpand', v);
 }
 
 final sendBehaviorProvider = Provider<SendBehavior>((ref) {
@@ -166,6 +200,16 @@ final sendBehaviorProvider = Provider<SendBehavior>((ref) {
   // changes; notifier.sendBehavior just reads the current value.
   ref.watch(prefsProvider);
   return ref.read(prefsProvider.notifier).sendBehavior;
+});
+
+final toolCallExpandModeProvider = Provider<ToolCallExpandMode>((ref) {
+  ref.watch(prefsProvider);
+  return ref.read(prefsProvider.notifier).toolCallExpandMode;
+});
+
+final cotAutoExpandProvider = Provider<bool>((ref) {
+  ref.watch(prefsProvider);
+  return ref.read(prefsProvider.notifier).cotAutoExpand;
 });
 
 // --- Novels ---

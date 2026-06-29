@@ -11,7 +11,11 @@ import '../../state/providers.dart' show editorStateProvider;
 ///  - Select mode: tap-to-select paragraph blocks (multi-select).
 class EditorPane extends ConsumerStatefulWidget {
   final EditorState editor;
-  const EditorPane({super.key, required this.editor});
+  /// Extra bottom padding so the editor's scrollable content can rise above
+  /// the floating agent panel in portrait (0 in landscape). Equals the panel
+  /// height passed from EditorScreen.
+  final double bottomInset;
+  const EditorPane({super.key, required this.editor, this.bottomInset = 0});
 
   @override
   ConsumerState<EditorPane> createState() => _EditorPaneState();
@@ -76,7 +80,7 @@ class _EditorPaneState extends ConsumerState<EditorPane> {
 
     if (isEdit) {
       return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: EdgeInsets.fromLTRB(16, 8, 16, 8 + widget.bottomInset),
         child: TextField(
           controller: _ctrl,
           scrollController: _scroll,
@@ -107,6 +111,7 @@ class _EditorPaneState extends ConsumerState<EditorPane> {
       selectedIds: editor.selectedParagraphIds,
       onToggle: notifier.toggleParagraphSelection,
       onSelectRange: notifier.selectParagraphRange,
+      bottomInset: widget.bottomInset,
     );
   }
 }
@@ -119,12 +124,14 @@ class _ParagraphSelectList extends StatefulWidget {
   final Set<String> selectedIds;
   final void Function(String id) onToggle;
   final void Function(int from, int to, {required bool select}) onSelectRange;
+  final double bottomInset;
 
   const _ParagraphSelectList({
     required this.paragraphs,
     required this.selectedIds,
     required this.onToggle,
     required this.onSelectRange,
+    this.bottomInset = 0,
   });
 
   @override
@@ -254,7 +261,7 @@ class _ParagraphSelectListState extends State<_ParagraphSelectList> {
       },
       child: ListView.builder(
         controller: _scroll,
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.fromLTRB(12, 12, 12, 12 + widget.bottomInset),
         itemCount: widget.paragraphs.length,
         itemBuilder: (context, i) {
           final p = widget.paragraphs[i];

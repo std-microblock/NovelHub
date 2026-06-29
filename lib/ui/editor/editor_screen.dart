@@ -28,6 +28,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   // Anchors captured on drag start: global Y and height at that moment.
   double _dragStartY = 0;
   double _dragStartH = 0;
+  // Measured minimum panel height = header + composer (reported by AgentPane
+  // after layout). The drag clamp uses this so the panel can collapse to
+  // exactly header + input box. Fallback 120 until the first measure lands.
+  double _measuredMinH = 120;
 
   @override
   Widget build(BuildContext context) {
@@ -87,8 +91,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
           // is an overlay that takes no layout space and only shows on hover or
           // while dragging.
           final total = constraints.maxHeight;
+          // Minimum panel height = measured header + composer (reported by
+          // AgentPane after layout) so the panel can collapse to exactly
+          // header + input box. Fallback 120 until the first measure lands.
+          final minH = _measuredMinH.clamp(80.0, total - 80);
           final agentH = (_agentH ?? total * 0.45)
-              .clamp(120.0, total - 80)
+              .clamp(minH, total - 80)
               .toDouble();
           return Stack(
             // No clip so the shadow can spread above the panel onto the editor.
@@ -97,7 +105,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
               // Upper editor fills everything; the floating panel overlaps its
               // lower portion (the shadow sits on top of the editor).
               Positioned.fill(
-                child: EditorPane(editor: editor),
+                child: EditorPane(editor: editor, bottomInset: agentH),
               ),
               // Floating agent panel: top rounded corners + drop shadow; the
               // bottom edge is flush with the screen bottom (square corners).
@@ -126,7 +134,35 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                   ),
                   child: ClipPath(
                     clipper: const _TopRoundClipper(top: 16),
-                    child: AgentPane(editor: editor),
+                    child: AgentPane(
+                      editor: editor,
+                      panelHeight: agentH,
+                      minPanelHeight: minH,
+                      // Same position-based drag logic as the strip handle:
+                      // anchor on start, recompute height from the finger's
+                      // absolute Y every update. Wired to the "Agent" header
+                      // row so dragging the title / blank header area resizes
+                      // the panel.
+                      onDragStart: (startGlobalY) {
+                        _dragStartY = startGlobalY;
+                        _dragStartH = agentH;
+                      },
+                      onDragUpdate: (globalY) {
+                        setState(() {
+                          final dragDistance = _dragStartY - globalY;
+                          _agentH = (_dragStartH + dragDistance)
+                              .clamp(minH, total - 80)
+                              .toDouble();
+                        });
+                      },
+                      // AgentPane measures its header + composer and reports
+                      // the height so the drag clamp can stop at exactly that.
+                      onMeasuredMinH: (h) {
+                        if ((h - _measuredMinH).abs() > 0.5) {
+                          setState(() => _measuredMinH = h);
+                        }
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -152,7 +188,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                     setState(() {
                       final dragDistance = _dragStartY - globalY;
                       _agentH = (_dragStartH + dragDistance)
-                          .clamp(120.0, total - 80)
+                          .clamp(minH, total - 80)
                           .toDouble();
                     });
                   },

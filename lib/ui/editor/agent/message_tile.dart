@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'dart:async';
@@ -7,6 +8,7 @@ import 'dart:convert';
 
 import '../../../domain/conversation.dart';
 import '../../../domain/rich_text.dart';
+import '../../../state/providers.dart';
 import 'ref_badge.dart';
 /// One message row.
 ///  - Assistant content rendered as Markdown.
@@ -16,7 +18,7 @@ import 'ref_badge.dart';
 /// Per-message action chips (copy / edit / retry / delete for user messages;
 /// copy / retry / revert for assistant messages) live directly under each
 /// bubble, passed in from the turn cluster.
-class MessageTile extends StatefulWidget {
+class MessageTile extends ConsumerStatefulWidget {
   final Message message;
   final bool streaming;
   // Per-message action chips. Null = hide that chip (e.g. disabled while
@@ -38,10 +40,10 @@ class MessageTile extends StatefulWidget {
   });
 
   @override
-  State<MessageTile> createState() => _MessageTileState();
+  ConsumerState<MessageTile> createState() => _MessageTileState();
 }
 
-class _MessageTileState extends State<MessageTile>
+class _MessageTileState extends ConsumerState<MessageTile>
     with AutomaticKeepAliveClientMixin {
   bool _cotExpanded = false;
   bool _cotUserToggled = false;
@@ -52,6 +54,11 @@ class _MessageTileState extends State<MessageTile>
   @override
   void didUpdateWidget(covariant MessageTile oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // If CoT auto-expand is disabled, never auto-expand or auto-collapse the
+    // thinking process — leave it collapsed by default and let the user tap
+    // to expand/collapse (manual _cotUserToggled is still respected).
+    final cotAutoExpand = ref.read(cotAutoExpandProvider);
+    if (!cotAutoExpand) return;
     final m = widget.message;
     final oldM = oldWidget.message;
     // Auto-expand CoT while reasoning streams in (so the user sees it arrive),
@@ -284,7 +291,7 @@ class _MessageActionBarState extends State<_MessageActionBar> {
 /// For `edit_range` / `insert_at`, the call's `new_text` argument is parsed
 /// and rendered as normal readable text (split into paragraphs) instead of
 /// raw JSON, since it is novel prose the user authored.
-class ToolCallBlock extends StatefulWidget {
+class ToolCallBlock extends ConsumerStatefulWidget {
   final ToolCall call;
   final String? resultContent; // null = still running / no result yet
   final bool streaming; // args arriving or result pending
@@ -296,18 +303,23 @@ class ToolCallBlock extends StatefulWidget {
   });
 
   @override
-  State<ToolCallBlock> createState() => _ToolCallBlockState();
+  ConsumerState<ToolCallBlock> createState() => _ToolCallBlockState();
 }
 
-class _ToolCallBlockState extends State<ToolCallBlock>
+class _ToolCallBlockState extends ConsumerState<ToolCallBlock>
     with SingleTickerProviderStateMixin {
   bool _expanded = false;
   // Did the user manually toggle? If so, stop auto-expanding on every delta —
   // otherwise streaming rebuilds would immediately re-expand what the user
-  // just collapsed.
+  // just collapsed. ALWAYS respected, regardless of the configured mode.
   bool _userToggled = false;
   late final AnimationController _ctrl;
   late final Animation<double> _anim;
+
+  // longRunning mode: a 500ms timer armed when streaming starts. If the call
+  // is still streaming when it fires, the block expands; if the call finishes
+  // first, the timer is cancelled and the block stays collapsed.
+  Timer? _longRunTimer;
 
   @override
   void initState() {
@@ -315,35 +327,124 @@ class _ToolCallBlockState extends State<ToolCallBlock>
     _ctrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 180));
     _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOutCubic);
-    // Start expanded if already streaming on first mount.
-    _expanded = widget.streaming;
-    if (_expanded) _ctrl.value = 1.0;
+    // Apply mode-specific start behavior if already streaming on first mount.
+    if (widget.streaming) {
+      _onStreamStart(animate: false);
+    }
+  }
+
+  /// Apply the mode-specific behavior when streaming begins (or on first mount
+  /// while already streaming). `animate` toggles whether the expand is instant
+  /// (first mount, avoids an expand flash) or animated (later transitions).
+  void _onStreamStart({bool animate = true}) {
+    if (_userToggled) return;
+    final mode = ref.read(toolCallExpandModeProvider);
+    switch (mode) {
+      case ToolCallExpandMode.all:
+        _setExpanded(true, animate: animate);
+        break;
+      case ToolCallExpandMode.editOnly:
+        if (_isEditRelated(widget.call.name)) {
+          _setExpanded(true, animate: animate);
+        }
+        break;
+      case ToolCallExpandMode.longRunning:
+        // Don't expand immediately; arm a 500ms timer that expands only if
+        // the call is still streaming when it fires.
+        _armLongRunTimer();
+        break;
+      case ToolCallExpandMode.none:
+        // Never auto-expand.
+        break;
+    }
+  }
+
+  void _armLongRunTimer() {
+    _longRunTimer?.cancel();
+    _longRunTimer = Timer(const Duration(milliseconds: 500), () {
+      // Fires from an async Timer, so wrap the expand in setState — otherwise
+      // the SizeTransition would animate (driven by _ctrl) but the chevron
+      // icon in build (which reads _expanded) wouldn't rebuild to match.
+      if (!_userToggled && mounted && widget.streaming && !_expanded) {
+        setState(() => _setExpanded(true));
+      }
+    });
+  }
+
+  void _setExpanded(bool value, {bool animate = true}) {
+    _expanded = value;
+    if (value) {
+      if (animate) {
+        _ctrl.forward();
+      } else {
+        _ctrl.value = 1.0;
+      }
+    } else {
+      if (animate) {
+        _ctrl.reverse();
+      } else {
+        _ctrl.value = 0.0;
+      }
+    }
+  }
+
+  /// Whether the tool call is "edit-related" (a file-modifying tool), decided
+  /// from the tool name. Inclusive of common file-editing tool names so that
+  /// editOnly mode expands for all of them.
+  bool _isEditRelated(String name) {
+    final lower = name.toLowerCase();
+    const markers = [
+      'edit', 'write', 'apply', 'patch', 'replace',
+      'str_replace', 'insert', 'create_file', 'modify',
+    ];
+    return markers.any((m) => lower.contains(m));
   }
 
   @override
   void didUpdateWidget(covariant ToolCallBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Auto-expand while streaming so the user sees args stream in live — but
-    // only until the user has manually interacted; after that respect their
-    // choice for the rest of the stream.
-    if (!_userToggled && widget.streaming && !_expanded) {
-      _expanded = true;
-      _ctrl.forward();
-    } else if (!widget.streaming && oldWidget.streaming && _expanded) {
-      // Streaming just finished (result landed) → auto-collapse once.
-      _expanded = false;
-      _ctrl.reverse();
+    // Manual toggle always wins: once the user expands/collapses a block,
+    // stop auto-changing it for the rest of its lifetime.
+    if (_userToggled) return;
+
+    final isStreaming = widget.streaming;
+    final wasStreaming = oldWidget.streaming;
+
+    if (isStreaming && !wasStreaming) {
+      // Streaming just started → apply mode-specific start behavior.
+      _onStreamStart();
+    } else if (isStreaming && !_expanded) {
+      // Still streaming and currently collapsed. For all/editOnly, keep it
+      // expanded (covers a missed start transition); longRunning relies on the
+      // armed timer, none never expands.
+      final mode = ref.read(toolCallExpandModeProvider);
+      if (mode == ToolCallExpandMode.all ||
+          (mode == ToolCallExpandMode.editOnly &&
+              _isEditRelated(widget.call.name))) {
+        _setExpanded(true);
+      }
+    } else if (!isStreaming && wasStreaming) {
+      // Streaming just finished (result landed) → cancel any pending timer
+      // and auto-collapse blocks that were auto-expanded.
+      _longRunTimer?.cancel();
+      _longRunTimer = null;
+      if (_expanded) {
+        _setExpanded(false);
+      }
     }
   }
 
   @override
   void dispose() {
+    _longRunTimer?.cancel();
     _ctrl.dispose();
     super.dispose();
   }
 
   void _toggle() {
     _userToggled = true;
+    // The user took over: any pending longRunning expansion is now moot.
+    _longRunTimer?.cancel();
     setState(() => _expanded = !_expanded);
     if (_expanded) {
       _ctrl.forward();

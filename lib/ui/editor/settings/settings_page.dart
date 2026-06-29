@@ -61,6 +61,31 @@ class SettingsPage extends ConsumerWidget {
                     },
                   ),
                 const Divider(height: 32),
+                // --- Agent panel preferences ---
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Text('工具调用展开方式',
+                      style:
+                          Theme.of(context).textTheme.titleSmall),
+                ),
+                for (final m in ToolCallExpandMode.values)
+                  RadioListTile<ToolCallExpandMode>(
+                    value: m,
+                    groupValue: ref.watch(toolCallExpandModeProvider),
+                    title: Text(m.label),
+                    onChanged: (v) {
+                      if (v != null) {
+                        ref.read(prefsProvider.notifier).toolCallExpandMode = v;
+                      }
+                    },
+                  ),
+                SwitchListTile(
+                  title: const Text('思考过程自动展开'),
+                  value: ref.watch(cotAutoExpandProvider),
+                  onChanged: (v) =>
+                      ref.read(prefsProvider.notifier).cotAutoExpand = v,
+                ),
+                const Divider(height: 32),
                 // --- Model list ---
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
