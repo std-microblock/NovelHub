@@ -5,102 +5,150 @@ import '../../../data/llm/llm_client.dart';
 import '../../../state/providers.dart';
 import 'provider_config_form.dart';
 
-class SettingsPage extends ConsumerWidget {
+class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends ConsumerState<SettingsPage>
+    with TickerProviderStateMixin {
+  late final TabController _tabController = TabController(
+    length: 2,
+    vsync: this,
+  )..addListener(_onTabChanged);
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  /// Rebuild so the AppBar action (the "+" add-config button) follows the
+  /// active tab. indexIsChanging is true mid-swipe; we wait for it to settle
+  /// rather than rebuilding on every animation frame.
+  void _onTabChanged() {
+    if (!_tabController.indexIsChanging) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _addConfig() async {
+    final cfg = ProviderConfig(
+      id: 'cfg_${DateTime.now().millisecondsSinceEpoch}',
+      name: '新配置',
+      type: ProviderType.openaiStreaming,
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: '',
+      modelName: 'gpt-4o-mini',
+    );
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ProviderConfigForm(config: cfg, isNew: true),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final providersAv = ref.watch(providerConfigListProvider);
     final providers = providersAv.valueOrNull ?? [];
     final activeId = ref.watch(activeProviderIdProvider).valueOrNull;
+    // The "+" action only makes sense on the models tab; hide it elsewhere.
+    final onModelsTab = _tabController.index == 1;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('设置 · LLM 模型'),
+        title: const Text('设置'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: '新增配置',
-            onPressed: () async {
-              final cfg = ProviderConfig(
-                id: 'cfg_${DateTime.now().millisecondsSinceEpoch}',
-                name: '新配置',
-                type: ProviderType.openaiStreaming,
-                baseUrl: 'https://api.openai.com/v1',
-                apiKey: '',
-                modelName: 'gpt-4o-mini',
-              );
-              await Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => ProviderConfigForm(config: cfg, isNew: true),
-              ));
-            },
-          ),
+          if (onModelsTab)
+            IconButton(
+              icon: const Icon(Icons.add),
+              tooltip: '新增配置',
+              onPressed: _addConfig,
+            ),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: '偏好'),
+            Tab(text: '模型'),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _preferencesTab(context),
+          _modelsTab(providers, activeId),
         ],
       ),
-      body: providers.isEmpty
-          ? Center(child: Text('点击右上角 + 新增第一个模型配置'))
-          : ListView(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              children: [
-                // --- Sending preferences ---
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                  child: Text('发送方式',
-                      style:
-                          Theme.of(context).textTheme.titleSmall),
-                ),
-                for (final b in SendBehavior.values)
-                  RadioListTile<SendBehavior>(
-                    value: b,
-                    groupValue: ref.watch(sendBehaviorProvider),
-                    title: Text(b.label),
-                    onChanged: (v) {
-                      if (v != null) {
-                        ref.read(prefsProvider.notifier).sendBehavior = v;
-                      }
-                    },
-                  ),
-                const Divider(height: 32),
-                // --- Agent panel preferences ---
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: Text('工具调用展开方式',
-                      style:
-                          Theme.of(context).textTheme.titleSmall),
-                ),
-                for (final m in ToolCallExpandMode.values)
-                  RadioListTile<ToolCallExpandMode>(
-                    value: m,
-                    groupValue: ref.watch(toolCallExpandModeProvider),
-                    title: Text(m.label),
-                    onChanged: (v) {
-                      if (v != null) {
-                        ref.read(prefsProvider.notifier).toolCallExpandMode = v;
-                      }
-                    },
-                  ),
-                SwitchListTile(
-                  title: const Text('思考过程自动展开'),
-                  value: ref.watch(cotAutoExpandProvider),
-                  onChanged: (v) =>
-                      ref.read(prefsProvider.notifier).cotAutoExpand = v,
-                ),
-                const Divider(height: 32),
-                // --- Model list ---
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: Text('模型配置',
-                      style:
-                          Theme.of(context).textTheme.titleSmall),
-                ),
-                for (final p in providers) _configTile(context, ref, p, activeId, providers.length),
-              ],
-            ),
     );
   }
 
-  Widget _configTile(BuildContext context, WidgetRef ref, ProviderConfig p,
-      String? activeId, int total) {
+  Widget _preferencesTab(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        // --- Sending preferences ---
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Text('发送方式',
+              style:
+                  Theme.of(context).textTheme.titleSmall),
+        ),
+        for (final b in SendBehavior.values)
+          RadioListTile<SendBehavior>(
+            value: b,
+            groupValue: ref.watch(sendBehaviorProvider),
+            title: Text(b.label),
+            onChanged: (v) {
+              if (v != null) {
+                ref.read(prefsProvider.notifier).sendBehavior = v;
+              }
+            },
+          ),
+        const Divider(height: 32),
+        // --- Agent panel preferences ---
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+          child: Text('工具调用展开方式',
+              style:
+                  Theme.of(context).textTheme.titleSmall),
+        ),
+        for (final m in ToolCallExpandMode.values)
+          RadioListTile<ToolCallExpandMode>(
+            value: m,
+            groupValue: ref.watch(toolCallExpandModeProvider),
+            title: Text(m.label),
+            onChanged: (v) {
+              if (v != null) {
+                ref.read(prefsProvider.notifier).toolCallExpandMode = v;
+              }
+            },
+          ),
+        SwitchListTile(
+          title: const Text('思考过程自动展开'),
+          value: ref.watch(cotAutoExpandProvider),
+          onChanged: (v) =>
+              ref.read(prefsProvider.notifier).cotAutoExpand = v,
+        ),
+      ],
+    );
+  }
+
+  Widget _modelsTab(List<ProviderConfig> providers, String? activeId) {
+    if (providers.isEmpty) {
+      return const Center(child: Text('点击右上角 + 新增第一个模型配置'));
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        for (final p in providers) _configTile(p, activeId),
+      ],
+    );
+  }
+
+  Widget _configTile(ProviderConfig p, String? activeId) {
     final active = p.id == activeId;
     return ListTile(
       leading: Radio<String?>(
