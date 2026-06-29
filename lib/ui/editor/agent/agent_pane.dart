@@ -636,6 +636,19 @@ class _TurnCluster extends ConsumerWidget {
         key: ValueKey(m.id),
         message: m,
         streaming: streaming && i == messages.length - 1,
+        onRetry: m.role == MessageRole.user ? onRetry : null,
+        onCopy: m.role == MessageRole.user
+            ? () {
+                // Render ref tokens as their readable label instead of raw
+                // @@${...}$@@ markup.
+                final text = parseRich(m.content)
+                    .map((p) => p is TextPiece
+                        ? p.text
+                        : (p is TokenPiece ? p.token.label : ''))
+                    .join();
+                Clipboard.setData(ClipboardData(text: text));
+              }
+            : null,
       ));
       if (m.role == MessageRole.assistant) {
         // ask_user only becomes interactive once the loop has actually paused

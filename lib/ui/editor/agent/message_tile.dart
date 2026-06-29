@@ -17,10 +17,16 @@ import 'ref_badge.dart';
 class MessageTile extends StatefulWidget {
   final Message message;
   final bool streaming;
+  // For user messages: long-press menu actions. Null disables the menu.
+  // `onRetry` regenerates the assistant reply to this user message.
+  final VoidCallback? onRetry;
+  final VoidCallback? onCopy;
   const MessageTile({
     super.key,
     required this.message,
     this.streaming = false,
+    this.onRetry,
+    this.onCopy,
   });
 
   @override
@@ -38,18 +44,30 @@ class _MessageTileState extends State<MessageTile>
   @override
   void didUpdateWidget(covariant MessageTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Auto-expand CoT while it streams in (so the user sees reasoning arrive),
+    final m = widget.message;
+    final oldM = oldWidget.message;
+    // Auto-expand CoT while reasoning streams in (so the user sees it arrive),
     // unless the user has already toggled it manually — then leave it alone.
+    // Only expand while we're still in the reasoning phase (no body text yet):
+    // once the prose starts arriving we collapse it again below.
     if (!_cotUserToggled && widget.streaming &&
-        widget.message.reasoningContent.isNotEmpty &&
+        m.reasoningContent.isNotEmpty &&
+        m.content.isEmpty &&
         !_cotExpanded) {
       _cotExpanded = true;
+    } else if (!_cotUserToggled &&
+        m.content.isNotEmpty &&
+        oldM.content.isEmpty &&
+        _cotExpanded) {
+      // Body text just started arriving → collapse the CoT so the prose takes
+      // focus. Previously this only happened after the whole message ended.
+      _cotExpanded = false;
     } else if (!_cotUserToggled &&
         !widget.streaming &&
         oldWidget.streaming &&
         _cotExpanded) {
-      // Streaming just ended → auto-collapse the CoT back, unless the user
-      // manually expanded it during the stream.
+      // Streaming just ended (e.g. a reasoning-only turn) → auto-collapse
+      // the CoT back, unless the user manually expanded it during the stream.
       _cotExpanded = false;
     }
   }
@@ -73,62 +91,117 @@ class _MessageTileState extends State<MessageTile>
         isUser ? scheme.primary : scheme.surfaceContainerHigh;
     final fgColor = isUser ? scheme.onPrimary : scheme.onSurface;
 
+    // User bubbles support a long-press context menu (regenerate reply / copy).
+    final hasMenu = isUser && (widget.onRetry != null || widget.onCopy != null);
+
+    Widget bubble = Container(
+      constraints: const BoxConstraints(maxWidth: 560),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(16),
+          topRight: const Radius.circular(16),
+          bottomLeft: Radius.circular(isUser ? 16 : 4),
+          bottomRight: Radius.circular(isUser ? 4 : 16),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // CoT (collapsible, collapsed by default).
+          if (m.reasoningContent.isNotEmpty)
+            _CollapsibleCot(
+              content: m.reasoningContent,
+              expanded: _cotExpanded,
+              onToggle: () => setState(() {
+                _cotUserToggled = true;
+                _cotExpanded = !_cotExpanded;
+              }),
+              color: fgColor,
+            ),
+          if (m.content.isNotEmpty || !widget.streaming)
+            isUser
+                ? _RichUserContent(content: m.content, fgColor: fgColor)
+                : _MarkdownContent(
+                    // Key by streaming state so the widget fully remounts
+                    // when streaming flips to false (turn ends), instead of
+                    // toggling enableSelection in place — which raced the
+                    // SelectionContainer layout. Streaming: animation on,
+                    // selection off. Settled: static render, selection on.
+                    key: ValueKey('md_${m.id}_${widget.streaming}'),
+                    data: m.content,
+                    fgColor: fgColor,
+                    theme: Theme.of(context),
+                    streaming: widget.streaming,
+                  )
+          else
+            const _TypingDots(),
+          if (widget.streaming && m.content.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: _TypingDots(),
+            ),
+        ],
+      ),
+    );
+
+    if (hasMenu) {
+      bubble = GestureDetector(
+        onLongPress: () => _showUserMenu(context),
+        child: bubble,
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 560),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: bubbleColor,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(16),
-              topRight: const Radius.circular(16),
-              bottomLeft: Radius.circular(isUser ? 16 : 4),
-              bottomRight: Radius.circular(isUser ? 4 : 16),
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // CoT (collapsible, collapsed by default).
-              if (m.reasoningContent.isNotEmpty)
-                _CollapsibleCot(
-                  content: m.reasoningContent,
-                  expanded: _cotExpanded,
-                  onToggle: () => setState(() {
-                    _cotUserToggled = true;
-                    _cotExpanded = !_cotExpanded;
-                  }),
-                  color: fgColor,
-                ),
-              if (m.content.isNotEmpty || !widget.streaming)
-                isUser
-                    ? _RichUserContent(content: m.content, fgColor: fgColor)
-                    : _MarkdownContent(
-                        // Key by streaming state so the widget fully remounts
-                        // when streaming flips to false (turn ends), instead of
-                        // toggling enableSelection in place — which raced the
-                        // SelectionContainer layout. Streaming: animation on,
-                        // selection off. Settled: static render, selection on.
-                        key: ValueKey('md_${m.id}_${widget.streaming}'),
-                        data: m.content,
-                        fgColor: fgColor,
-                        theme: Theme.of(context),
-                        streaming: widget.streaming,
-                      )
-              else
-                const _TypingDots(),
-              if (widget.streaming && m.content.isNotEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 4),
-                  child: _TypingDots(),
-                ),
-            ],
-          ),
-        ),
+        child: bubble,
       ),
+    );
+  }
+
+  void _showUserMenu(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    showMenu<String>(
+      context: context,
+      // Position the menu near the bubble's right edge (user bubbles are
+      // right-aligned).
+      position: RelativeRect.fromLTRB(
+        MediaQuery.sizeOf(context).width,
+        0,
+        16,
+        MediaQuery.sizeOf(context).height,
+      ),
+      color: scheme.surfaceContainerHigh,
+      items: [
+        if (widget.onRetry != null)
+          const PopupMenuItem(value: 'retry', child: _MenuRow(icon: Icons.refresh, label: '重新生成')),
+        if (widget.onCopy != null)
+          const PopupMenuItem(value: 'copy', child: _MenuRow(icon: Icons.copy, label: '复制')),
+      ],
+    ).then((v) {
+      if (v == 'retry') widget.onRetry?.call();
+      if (v == 'copy') widget.onCopy?.call();
+    });
+  }
+}
+
+/// A single icon+label row for a popup menu.
+class _MenuRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _MenuRow({required this.icon, required this.label});
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: scheme.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Text(label, style: TextStyle(color: scheme.onSurface)),
+      ],
     );
   }
 }
