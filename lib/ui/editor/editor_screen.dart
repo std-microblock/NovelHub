@@ -19,7 +19,8 @@ class EditorScreen extends ConsumerStatefulWidget {
   ConsumerState<EditorScreen> createState() => _EditorScreenState();
 }
 
-class _EditorScreenState extends ConsumerState<EditorScreen> {
+class _EditorScreenState extends ConsumerState<EditorScreen>
+    with TickerProviderStateMixin {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   // Raw pixel height of the agent panel (portrait only). Tracked directly off
   // the finger's absolute position — no delta accumulation — so the handle
@@ -28,10 +29,121 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   // Anchors captured on drag start: global Y and height at that moment.
   double _dragStartY = 0;
   double _dragStartH = 0;
-  // Measured minimum panel height = header + composer (reported by AgentPane
-  // after layout). The drag clamp uses this so the panel can collapse to
-  // exactly header + input box. Fallback 120 until the first measure lands.
-  double _measuredMinH = 120;
+  // Measured panel heights reported by AgentPane after layout:
+  //  _headerH — header only (the fully-collapsed floor)
+  //  _midH    — header + composer (the half-collapsed resting state)
+  // Fallbacks until the first measure lands.
+  double _headerH = 36;
+  double _midH = 120;
+  // Expanded height remembered across collapse, so tapping the title expands
+  // back to where the user had it (not just to the default).
+  double _expandedH = 0;
+  // Animates the snap to a resting state on drag end (spring-like damping).
+  late final AnimationController _snap;
+  Animation<double>? _snapAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _snap = AnimationController(vsync: this);
+    _snap.addListener(() {
+      final a = _snapAnim;
+      if (a == null) return;
+      setState(() => _agentH = a.value);
+    });
+  }
+
+  @override
+  void dispose() {
+    _snap.dispose();
+    super.dispose();
+  }
+
+  /// Drag started from the header or strip handle.
+  void _onDragStart(double startGlobalY, double currentH) {
+    _snap.stop();
+    _snapAnim = null;
+    _dragStartY = startGlobalY;
+    _dragStartH = currentH;
+  }
+
+  /// Drag update — position-based, with a damping band below [_midH]: the lower
+  /// the panel goes past the half-collapsed point, the harder each px of finger
+  /// motion is to earn (like a spring resisting compression). This gives the
+  /// "费劲" feel approaching the fully-collapsed floor.
+  void _onDragUpdate(double globalY, double total) {
+    final maxH = total - 80;
+    final floor = _headerH.clamp(0.0, maxH);
+    final mid = _midH.clamp(floor, maxH);
+    final band = (mid - floor).clamp(1.0, double.infinity);
+    // Raw 1:1 target height from the finger's absolute position.
+    var target = _dragStartH + (_dragStartY - globalY);
+    // Below [mid] we enter the damping band: scale the distance into the band
+    // by a factor that shrinks toward 0 at the floor, so reaching fully-collapsed
+    // takes deliberate extra dragging.
+    if (target < mid) {
+      final into = (mid - target).clamp(0.0, band); // how far past mid
+      final k = (1 - (into / band)).clamp(0.15, 1.0); // resistance grows
+      target = mid - into * k;
+    }
+    target = target.clamp(floor, maxH);
+    setState(() => _agentH = target);
+  }
+
+  /// Drag ended — snap to the nearest resting state with a spring animation.
+  ///  • below midH → snap to either fully-collapsed (floor) or half-collapsed
+  ///    (mid), whichever is closer, UNLESS the finger pushed past midH once we
+  ///    land in expanded territory.
+  ///  • at/above midH → free rest (expanded); remember it for tap-to-expand.
+  void _onDragEnd(double total) {
+    final maxH = total - 80;
+    final floor = _headerH.clamp(0.0, maxH);
+    final mid = _midH.clamp(floor, maxH);
+    final h = (_agentH ?? mid);
+
+    double target;
+    if (h >= mid + 48) {
+      // Expanded — let it rest where it is.
+      target = h.clamp(mid + 48, maxH);
+      _expandedH = target;
+    } else {
+      // In or near the band → snap to the nearer of floor / mid.
+      target = (h - floor) < (mid - h) ? floor : mid;
+    }
+    _animateTo(target);
+  }
+
+  /// Tap the "Agent" title → toggle between fully-collapsed and the last
+  /// expanded height (falling back to a default 45% of the screen).
+  void _onToggleExpand(double total) {
+    final maxH = total - 80;
+    final floor = _headerH.clamp(0.0, maxH);
+    final mid = _midH.clamp(floor, maxH);
+    final h = (_agentH ?? mid);
+    if (h <= mid + 1) {
+      // Collapsed → expand to remembered height (or default 45%).
+      final target =
+          (_expandedH > mid + 48 ? _expandedH : (total * 0.45)).clamp(mid + 48, maxH);
+      _expandedH = target;
+      _animateTo(target);
+    } else {
+      // Expanded → fully collapse.
+      _animateTo(floor);
+    }
+  }
+
+  void _animateTo(double target) {
+    final from = _agentH ?? target;
+    _snapAnim = Tween<double>(begin: from, end: target).animate(
+      CurvedAnimation(
+        parent: _snap,
+        // Spring-like: easeOutBack overshoots slightly for a lively snap.
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    _snap.duration = const Duration(milliseconds: 220);
+    _snap.forward(from: 0);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -91,13 +203,14 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
           // is an overlay that takes no layout space and only shows on hover or
           // while dragging.
           final total = constraints.maxHeight;
-          // Minimum panel height = measured header + composer (reported by
-          // AgentPane after layout) so the panel can collapse to exactly
-          // header + input box. Fallback 120 until the first measure lands.
-          final minH = _measuredMinH.clamp(80.0, total - 80);
-          final agentH = (_agentH ?? total * 0.45)
-              .clamp(minH, total - 80)
-              .toDouble();
+          final maxH = total - 80;
+          // Resting-state heights reported by AgentPane after layout:
+          //  floor = header only (fully-collapsed)
+          //  mid   = header + composer (half-collapsed)
+          // Fallbacks until the first measure lands.
+          final floor = _headerH.clamp(0.0, maxH);
+          final mid = _midH.clamp(floor, maxH);
+          final agentH = (_agentH ?? total * 0.45).clamp(floor, maxH).toDouble();
           return Stack(
             // No clip so the shadow can spread above the panel onto the editor.
             clipBehavior: Clip.none,
@@ -137,30 +250,33 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                     child: AgentPane(
                       editor: editor,
                       panelHeight: agentH,
-                      minPanelHeight: minH,
+                      headerHeight: floor,
+                      midHeight: mid,
                       // Same position-based drag logic as the strip handle:
                       // anchor on start, recompute height from the finger's
-                      // absolute Y every update. Wired to the "Agent" header
-                      // row so dragging the title / blank header area resizes
-                      // the panel.
-                      onDragStart: (startGlobalY) {
-                        _dragStartY = startGlobalY;
-                        _dragStartH = agentH;
-                      },
-                      onDragUpdate: (globalY) {
-                        setState(() {
-                          final dragDistance = _dragStartY - globalY;
-                          _agentH = (_dragStartH + dragDistance)
-                              .clamp(minH, total - 80)
-                              .toDouble();
-                        });
-                      },
-                      // AgentPane measures its header + composer and reports
-                      // the height so the drag clamp can stop at exactly that.
-                      onMeasuredMinH: (h) {
-                        if ((h - _measuredMinH).abs() > 0.5) {
-                          setState(() => _measuredMinH = h);
+                      // absolute Y every update (with a damping band below
+                      // [mid]). Wired to the "Agent" header row so dragging
+                      // the title / blank header area resizes the panel.
+                      onDragStart: (g) => _onDragStart(g, agentH),
+                      onDragUpdate: (g) => _onDragUpdate(g, total),
+                      onDragEnd: () => _onDragEnd(total),
+                      // Tap (no drag) on the title / blank header toggles
+                      // between fully-collapsed and the last expanded height.
+                      onToggleExpand: () => _onToggleExpand(total),
+                      // AgentPane measures its header (and header + composer)
+                      // and reports both so the drag clamp and snap bands stay
+                      // in sync with the actual widget sizes.
+                      onMeasureHeights: (h, m) {
+                        var changed = false;
+                        if ((h - _headerH).abs() > 0.5) {
+                          _headerH = h;
+                          changed = true;
                         }
+                        if (m > 0 && (m - _midH).abs() > 0.5) {
+                          _midH = m;
+                          changed = true;
+                        }
+                        if (changed) setState(() {});
                       },
                     ),
                   ),
@@ -180,18 +296,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                   // accumulation was losing ~1/3 of the motion (fixed ratio),
                   // likely from gesture-arena delta coalescing. Position-based
                   // dragging is immune to that — the panel tracks the finger 1:1.
-                  onStart: (startGlobalY) {
-                    _dragStartY = startGlobalY;
-                    _dragStartH = agentH;
-                  },
-                  onUpdate: (globalY) {
-                    setState(() {
-                      final dragDistance = _dragStartY - globalY;
-                      _agentH = (_dragStartH + dragDistance)
-                          .clamp(minH, total - 80)
-                          .toDouble();
-                    });
-                  },
+                  onStart: (g) => _onDragStart(g, agentH),
+                  onUpdate: (g) => _onDragUpdate(g, total),
+                  onEnd: () => _onDragEnd(total),
                 ),
               ),
             ],
@@ -271,7 +378,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
 class _AgentHandle extends StatefulWidget {
   final void Function(double startGlobalY) onStart;
   final void Function(double globalY) onUpdate;
-  const _AgentHandle({required this.onStart, required this.onUpdate});
+  final VoidCallback? onEnd;
+  const _AgentHandle({
+    required this.onStart,
+    required this.onUpdate,
+    this.onEnd,
+  });
 
   @override
   State<_AgentHandle> createState() => _AgentHandleState();
@@ -305,7 +417,10 @@ class _AgentHandleState extends State<_AgentHandle> {
         // every update — immune to delta coalescing/loss that broke
         // delta-based dragging (it tracked at ~2/3 speed).
         onVerticalDragUpdate: (d) => widget.onUpdate(d.globalPosition.dy),
-        onVerticalDragEnd: (_) => setState(() => _dragging = false),
+        onVerticalDragEnd: (_) {
+          setState(() => _dragging = false);
+          widget.onEnd?.call();
+        },
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 120),
           opacity: _active ? 1 : 0,

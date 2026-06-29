@@ -19,25 +19,36 @@ class AgentPane extends ConsumerStatefulWidget {
   final EditorState editor;
   /// Current panel height (portrait). `double.infinity` in landscape / unset.
   final double panelHeight;
-  /// Measured minimum = header + composer. The drag clamp in EditorScreen
-  /// stops here so the panel can collapse to exactly header + input box.
-  final double minPanelHeight;
+  /// Fully-collapsed height = header only. The drag clamp stops here so the
+  /// panel can shrink to just the "Agent" title (composer hidden).
+  final double headerHeight;
+  /// Half-collapsed height = header + composer (input visible, messages
+  /// hidden). The damping band sits below this.
+  final double midHeight;
   /// Position-based drag callbacks — the same ones the strip handle uses.
   /// Wired to the "Agent" header row so dragging the title / blank header area
-  /// resizes the panel.
+  /// resizes the panel. [onDragEnd] triggers snap-to-nearest-resting-state.
   final void Function(double startGlobalY)? onDragStart;
   final void Function(double globalY)? onDragUpdate;
-  /// Reports the measured header + composer height up to EditorScreen so it can
-  /// set its drag clamp to exactly that height.
-  final void Function(double measuredMinH)? onMeasuredMinH;
+  final VoidCallback? onDragEnd;
+  /// Tapped the "Agent" title / blank header area → toggle expand / collapse.
+  final VoidCallback? onToggleExpand;
+  /// Reports measured header height and (when the composer is rendered)
+  /// header + composer height, so EditorScreen can size its drag clamp and
+  /// snap bands. When fully collapsed the composer isn't rendered, so only the
+  /// header height is reported (EditorScreen keeps the last known midH).
+  final void Function(double headerH, double midH)? onMeasureHeights;
   const AgentPane({
     super.key,
     required this.editor,
     this.panelHeight = double.infinity,
-    this.minPanelHeight = 0,
+    this.headerHeight = 0,
+    this.midHeight = 0,
     this.onDragStart,
     this.onDragUpdate,
-    this.onMeasuredMinH,
+    this.onDragEnd,
+    this.onToggleExpand,
+    this.onMeasureHeights,
   });
 
   @override
@@ -48,8 +59,8 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
   final _scroll = ScrollController();
   bool _autoScroll = true;
   bool _showJumpButton = false;
-  // Keys used to measure the header + composer height so EditorScreen can
-  // clamp the panel's minimum drag height to exactly header + composer.
+  // Keys used to measure the header / composer height so EditorScreen can
+  // clamp the panel's drag range (header-only floor, header+composer band).
   final _headerKey = GlobalKey();
   final _composerKey = GlobalKey();
 
@@ -104,25 +115,37 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
     });
   }
 
-  /// Measure the actual header + composer height and report it up so
-  /// EditorScreen can clamp the panel's minimum drag height to exactly that.
-  void _measureMinH() {
-    final cb = widget.onMeasuredMinH;
+  /// Measure the header height and (when the composer is rendered) header +
+  /// composer height, reporting both up so EditorScreen can size its drag
+  /// clamp and snap bands. When fully collapsed the composer isn't rendered,
+  /// so only the header height is reported (EditorScreen keeps the last known
+  /// midH).
+  void _measureHeights() {
+    final cb = widget.onMeasureHeights;
     if (cb == null) return;
     final headerCtx = _headerKey.currentContext;
-    final composerCtx = _composerKey.currentContext;
-    if (headerCtx == null || composerCtx == null) return;
+    if (headerCtx == null) return;
     final headerBox = headerCtx.findRenderObject() as RenderBox?;
-    final composerBox = composerCtx.findRenderObject() as RenderBox?;
-    if (headerBox == null || composerBox == null) return;
-    if (!headerBox.attached || !composerBox.attached) return;
-    if (headerBox.size.isEmpty || composerBox.size.isEmpty) return;
-    cb(headerBox.size.height + composerBox.size.height);
+    if (headerBox == null || !headerBox.attached || headerBox.size.isEmpty) {
+      return;
+    }
+    final headerH = headerBox.size.height;
+    double midH = headerH;
+    final composerCtx = _composerKey.currentContext;
+    if (composerCtx != null) {
+      final composerBox = composerCtx.findRenderObject() as RenderBox?;
+      if (composerBox != null &&
+          composerBox.attached &&
+          !composerBox.size.isEmpty) {
+        midH = headerH + composerBox.size.height;
+      }
+    }
+    cb(headerH, midH);
   }
 
-  void _scheduleMeasureMinH() {
-    if (widget.onMeasuredMinH == null) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _measureMinH());
+  void _scheduleMeasureHeights() {
+    if (widget.onMeasureHeights == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureHeights());
   }
 
   void _jumpToBottom() {
@@ -177,18 +200,20 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
 
     final scheme = Theme.of(context).colorScheme;
 
-    // Collapsed: the panel has been shrunk to (near) its minimum — render only
-    // the header row + composer so the input stays usable and the message list
-    // doesn't show a thin sliver. EditorScreen clamps the drag to stop at
-    // [minPanelHeight] (= header + composer), so this is the resting state at
-    // the minimum drag position. Leave a small buffer (larger when an error
-    // banner is present) so expanding doesn't immediately overflow.
-    final collapseGap = widget.panelHeight - widget.minPanelHeight;
-    final collapsed = collapseGap < (editor.lastError != null ? 100.0 : 48.0);
+    // Three resting states, by panel height (reported by EditorScreen):
+    //  fully-collapsed → header only (composer hidden)
+    //  half-collapsed  → header + composer (messages hidden; a Spacer pushes
+    //                    the input to the bottom so it stays flush)
+    //  expanded        → header + messages + composer
+    final headerH = widget.headerHeight;
+    final midH = widget.midHeight;
+    final fullyCollapsed =
+        widget.panelHeight < headerH + (midH - headerH) * 0.5;
+    final collapsed = !fullyCollapsed && widget.panelHeight < midH + 48.0;
 
-    // Report the measured header + composer height up to EditorScreen so its
-    // drag clamp can stop at exactly that height (no clipping, no extra gap).
-    _scheduleMeasureMinH();
+    // Report measured header / header+composer heights up to EditorScreen so its
+    // drag clamp and snap bands stay in sync with the actual widget sizes.
+    _scheduleMeasureHeights();
 
     return Container(
       decoration: BoxDecoration(
@@ -199,8 +224,8 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
           // Header. The leading group (icon + "Agent" title + blank spacer)
           // forwards the same position-based drag callbacks the strip handle
           // uses, so dragging the title / empty header area resizes the panel.
-          // The trailing action buttons stay outside the gesture detector so
-          // they remain tappable.
+          // A tap (with no drag) toggles expand / collapse. The trailing action
+          // buttons stay outside the gesture detector so they remain tappable.
           Padding(
             key: _headerKey,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -215,6 +240,10 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                     onVerticalDragUpdate: widget.onDragUpdate == null
                         ? null
                         : (d) => widget.onDragUpdate!(d.globalPosition.dy),
+                    onVerticalDragEnd: widget.onDragEnd == null
+                        ? null
+                        : (_) => widget.onDragEnd!(),
+                    onTap: widget.onToggleExpand,
                     child: Row(
                       children: [
                         Icon(Icons.auto_awesome,
@@ -244,108 +273,114 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
               ],
             ),
           ),
-          // Error banner + message list are omitted when collapsed so the
-          // panel reduces to just header + composer (no thin message sliver).
-          // A Spacer pushes the composer to the bottom so it stays flush with
-          // the panel's bottom edge even when the height is a few px above the
-          // minimum (otherwise the input floats mid-panel with empty space).
-          if (collapsed) const Spacer(),
-          if (!collapsed) ...[
-            if (editor.lastError != null)
-              Container(
-                width: double.infinity,
-                margin: const EdgeInsets.symmetric(horizontal: 12),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: scheme.errorContainer,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.error_outline,
-                        size: 16, color: scheme.onErrorContainer),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        editor.lastError!,
-                        style: TextStyle(
-                            fontSize: 12, color: scheme.onErrorContainer),
-                        maxLines: 5,
-                        overflow: TextOverflow.ellipsis,
+          // Body — three states:
+          //  • fullyCollapsed: header only (composer hidden, a Spacer keeps the
+          //    header centered if the panel is briefly taller than the floor).
+          //  • collapsed (half): header + composer, no message list (a Spacer
+          //    pushes the input flush to the bottom edge).
+          //  • expanded: header + error banner + message list + composer.
+          if (fullyCollapsed)
+            const Spacer()
+          else ...[
+            if (collapsed)
+              const Spacer()
+            else ...[
+              if (editor.lastError != null)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(horizontal: 12),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: scheme.errorContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.error_outline,
+                          size: 16, color: scheme.onErrorContainer),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          editor.lastError!,
+                          style: TextStyle(
+                              fontSize: 12, color: scheme.onErrorContainer),
+                          maxLines: 5,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 16),
-                      tooltip: '重试',
-                      onPressed: editor.agentRunning
-                          ? null
-                          : () {
-                              final lastUser = messages.lastWhere(
-                                (m) => m.role == MessageRole.user,
-                                orElse: () => Message(
-                                    id: '',
-                                    role: MessageRole.user,
-                                    turnId: '',
-                                    createdAt: 0),
-                              );
-                              if (lastUser.id.isNotEmpty) {
-                                notifier.loadMessageForEdit(lastUser.id);
-                                _send();
-                              }
-                            },
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 2),
-            // Messages, grouped by turn (user msg + its assistant/tool replies).
-            Expanded(
-              child: messages.isEmpty && streaming.isEmpty
-                  ? Center(
-                      child: Text(
-                        '向 Agent 发送消息来开始写作…',
-                        style: TextStyle(color: scheme.onSurfaceVariant),
+                      IconButton(
+                        icon: const Icon(Icons.refresh, size: 16),
+                        tooltip: '重试',
+                        onPressed: editor.agentRunning
+                            ? null
+                            : () {
+                                final lastUser = messages.lastWhere(
+                                  (m) => m.role == MessageRole.user,
+                                  orElse: () => Message(
+                                      id: '',
+                                      role: MessageRole.user,
+                                      turnId: '',
+                                      createdAt: 0),
+                                );
+                                if (lastUser.id.isNotEmpty) {
+                                  notifier.loadMessageForEdit(lastUser.id);
+                                  _send();
+                                }
+                              },
                       ),
-                    )
-                  : Stack(
-                      children: [
-                        _TurnList(controller: _scroll),
-                        // Jump-to-bottom button: always in the tree, toggled via
-                        // opacity rather than conditionally rendered, so showing/
-                        // hiding it doesn't change the Stack's child structure
-                        // (which re-laid-out the ListView and made the content
-                        // "jolt" each time the button appeared).
-                        Positioned(
-                          right: 12,
-                          bottom: 8,
-                          child: IgnorePointer(
-                            ignoring: !_showJumpButton,
-                            child: AnimatedOpacity(
-                              duration:
-                                  const Duration(milliseconds: 150),
-                              curve: Curves.easeOut,
-                              opacity: _showJumpButton ? 1 : 0,
-                              child: _JumpToBottomButton(
-                                onTap: _jumpToBottom,
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 2),
+              // Messages, grouped by turn (user msg + its assistant/tool replies).
+              Expanded(
+                child: messages.isEmpty && streaming.isEmpty
+                    ? Center(
+                        child: Text(
+                          '向 Agent 发送消息来开始写作…',
+                          style: TextStyle(color: scheme.onSurfaceVariant),
+                        ),
+                      )
+                    : Stack(
+                        children: [
+                          _TurnList(controller: _scroll),
+                          // Jump-to-bottom button: always in the tree, toggled via
+                          // opacity rather than conditionally rendered, so showing/
+                          // hiding it doesn't change the Stack's child structure
+                          // (which re-laid-out the ListView and made the content
+                          // "jolt" each time the button appeared).
+                          Positioned(
+                            right: 12,
+                            bottom: 8,
+                            child: IgnorePointer(
+                              ignoring: !_showJumpButton,
+                              child: AnimatedOpacity(
+                                duration:
+                                    const Duration(milliseconds: 150),
+                                curve: Curves.easeOut,
+                                opacity: _showJumpButton ? 1 : 0,
+                                child: _JumpToBottomButton(
+                                  onTap: _jumpToBottom,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      ),
+              ),
+            ],
+            // Composer is rendered in both half-collapsed and expanded states.
+            _Composer(
+              key: _composerKey,
+              content: editor.draftContent,
+              running: editor.agentRunning,
+              editing: editor.editingMessageId != null,
+              hasSelection: editor.selectedParagraphIds.isNotEmpty,
+              onSend: _send,
+              onChanged: (c) =>
+                  ref.read(editorStateProvider.notifier).setDraftContent(c),
             ),
           ],
-          // Composer.
-          _Composer(
-            key: _composerKey,
-            content: editor.draftContent,
-            running: editor.agentRunning,
-            editing: editor.editingMessageId != null,
-            hasSelection: editor.selectedParagraphIds.isNotEmpty,
-            onSend: _send,
-            onChanged: (c) =>
-                ref.read(editorStateProvider.notifier).setDraftContent(c),
-          ),
         ],
       ),
     );
