@@ -38,6 +38,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
   // Expanded height remembered across collapse, so tapping the title expands
   // back to where the user had it (not just to the default).
   double _expandedH = 0;
+  // Raw (undamped) finger target captured during a drag, used to decide the
+  // snap on release. The visible height [_agentH] is damped in the collapse
+  // band so it lags the finger; if we snapped off the damped position the
+  // panel would always read "near mid" and spring back up instead of latching
+  // to fully-collapsed. Tracking the raw intent fixes that.
+  double _rawDragH = 0;
   // Animates the snap to a resting state on drag end (spring-like damping).
   late final AnimationController _snap;
   Animation<double>? _snapAnim;
@@ -59,18 +65,22 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     super.dispose();
   }
 
-  /// Drag started from the header or strip handle.
+  /// Drag started from the header grip.
   void _onDragStart(double startGlobalY, double currentH) {
     _snap.stop();
     _snapAnim = null;
     _dragStartY = startGlobalY;
     _dragStartH = currentH;
+    _rawDragH = currentH;
   }
 
   /// Drag update — position-based, with a damping band below [_midH]: the lower
   /// the panel goes past the half-collapsed point, the harder each px of finger
   /// motion is to earn (like a spring resisting compression). This gives the
-  /// "费劲" feel approaching the fully-collapsed floor.
+  /// "费劲" feel approaching the fully-collapsed floor. [_rawDragH] tracks the
+  /// undamped intent so the release snap reflects what the user was actually
+  /// aiming for (the damped [_agentH] lags the finger and would otherwise read
+  /// "near mid" forever, bouncing back up).
   void _onDragUpdate(double globalY, double total) {
     final maxH = total - 80;
     final floor = _headerH.clamp(0.0, maxH);
@@ -78,37 +88,46 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     final band = (mid - floor).clamp(1.0, double.infinity);
     // Raw 1:1 target height from the finger's absolute position.
     var target = _dragStartH + (_dragStartY - globalY);
+    target = target.clamp(floor, maxH);
+    _rawDragH = target;
     // Below [mid] we enter the damping band: scale the distance into the band
-    // by a factor that shrinks toward 0 at the floor, so reaching fully-collapsed
-    // takes deliberate extra dragging.
+    // by a factor that shrinks toward ~0.25 at the floor, so reaching
+    // fully-collapsed takes deliberate extra dragging while still letting the
+    // finger get there (not a hard wall).
+    double damped = target;
     if (target < mid) {
       final into = (mid - target).clamp(0.0, band); // how far past mid
-      final k = (1 - (into / band)).clamp(0.15, 1.0); // resistance grows
-      target = mid - into * k;
+      final k = (1 - (into / band) * 0.75).clamp(0.25, 1.0); // resistance grows
+      damped = mid - into * k;
     }
-    target = target.clamp(floor, maxH);
-    setState(() => _agentH = target);
+    setState(() => _agentH = damped);
   }
 
-  /// Drag ended — snap to the nearest resting state with a spring animation.
-  ///  • below midH → snap to either fully-collapsed (floor) or half-collapsed
-  ///    (mid), whichever is closer, UNLESS the finger pushed past midH once we
-  ///    land in expanded territory.
-  ///  • at/above midH → free rest (expanded); remember it for tap-to-expand.
+  /// Drag ended — snap to the nearest resting state using the RAW (undamped)
+  /// finger intent, so the panel latches to fully-collapsed when the user
+  /// dragged hard enough rather than springing back up to mid.
+  ///  • raw < ~⅓ into the band → fully-collapsed (floor)
+  ///  • raw < mid (but not past the threshold) → half-collapsed (mid)
+  ///  • raw >= mid → free rest (expanded); remember it for tap-to-expand.
   void _onDragEnd(double total) {
     final maxH = total - 80;
     final floor = _headerH.clamp(0.0, maxH);
     final mid = _midH.clamp(floor, maxH);
-    final h = (_agentH ?? mid);
+    final band = (mid - floor).clamp(1.0, double.infinity);
+    final raw = _rawDragH.clamp(floor, maxH);
 
     double target;
-    if (h >= mid + 48) {
-      // Expanded — let it rest where it is.
-      target = h.clamp(mid + 48, maxH);
+    if (raw >= mid) {
+      // Expanded — let it rest where the finger aimed.
+      target = raw.clamp(mid, maxH);
       _expandedH = target;
+    } else if (raw <= floor + band * 0.33) {
+      // Dragged most of the way down → collapse fully (header only).
+      target = floor;
     } else {
-      // In or near the band → snap to the nearer of floor / mid.
-      target = (h - floor) < (mid - h) ? floor : mid;
+      // Somewhere in the band but not far enough to fully collapse → rest at
+      // the half-collapsed (header + composer) state.
+      target = mid;
     }
     _animateTo(target);
   }
@@ -282,25 +301,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                   ),
                 ),
               ),
-              // Drag handle: overlay straddling the panel's top edge, no layout
-              // footprint. Kept thin and mostly inside the panel's top padding
-              // so it doesn't block the header's tap targets.
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: agentH - 6,
-                height: 14,
-                child: _AgentHandle(
-                  // Absolute-position based: recompute height from the finger's
-                  // global Y every frame instead of accumulating deltas. Delta
-                  // accumulation was losing ~1/3 of the motion (fixed ratio),
-                  // likely from gesture-arena delta coalescing. Position-based
-                  // dragging is immune to that — the panel tracks the finger 1:1.
-                  onStart: (g) => _onDragStart(g, agentH),
-                  onUpdate: (g) => _onDragUpdate(g, total),
-                  onEnd: () => _onDragEnd(total),
-                ),
-              ),
             ],
           );
         },
@@ -369,73 +369,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
       onPressed: () => ref.read(editorStateProvider.notifier).setMode(
             isEdit ? EditorMode.select : EditorMode.edit,
           ),
-    );
-  }
-}
-
-/// The floating agent panel's drag handle. Takes no layout space (it's an
-/// overlay) and the grip bar only appears on hover or while dragging.
-class _AgentHandle extends StatefulWidget {
-  final void Function(double startGlobalY) onStart;
-  final void Function(double globalY) onUpdate;
-  final VoidCallback? onEnd;
-  const _AgentHandle({
-    required this.onStart,
-    required this.onUpdate,
-    this.onEnd,
-  });
-
-  @override
-  State<_AgentHandle> createState() => _AgentHandleState();
-}
-
-class _AgentHandleState extends State<_AgentHandle> {
-  bool _hover = false;
-  bool _dragging = false;
-
-  bool get _active => _hover || _dragging;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeRow,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        // Opaque so the handle wins the vertical-drag gesture outright —
-        // otherwise the ListView below it competes in the arena and swallows
-        // part of every drag, which makes the panel lag behind the finger.
-        behavior: HitTestBehavior.opaque,
-        onVerticalDragStart: (d) {
-          setState(() => _dragging = true);
-          // Hand the starting global Y to the parent so it can anchor the
-          // absolute-position-based height computation.
-          widget.onStart(d.globalPosition.dy);
-        },
-        // Recompute the target height from the finger's *absolute* position
-        // every update — immune to delta coalescing/loss that broke
-        // delta-based dragging (it tracked at ~2/3 speed).
-        onVerticalDragUpdate: (d) => widget.onUpdate(d.globalPosition.dy),
-        onVerticalDragEnd: (_) {
-          setState(() => _dragging = false);
-          widget.onEnd?.call();
-        },
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 120),
-          opacity: _active ? 1 : 0,
-          child: Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: scheme.outline,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
