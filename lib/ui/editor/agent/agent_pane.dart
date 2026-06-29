@@ -638,11 +638,15 @@ class _TurnCluster extends ConsumerWidget {
         streaming: streaming && i == messages.length - 1,
       ));
       if (m.role == MessageRole.assistant) {
+        // ask_user only becomes interactive once the loop has actually paused
+        // for it — i.e. its callId is in pendingAskUserIds. Before that the
+        // tool-call arguments may still be streaming in (the `questions` array
+        // incomplete), and rendering AskUserCard mid-stream throws a RangeError
+        // (states list sized for a stale spec). While still streaming we render
+        // the generic ToolCallBlock placeholder instead.
+        final pendingAsk =
+            ref.watch(editorStateProvider.select((s) => s.pendingAskUserIds));
         for (final tc in m.toolCalls) {
-          // ask_user gets its own interactive / answered card instead of the
-          // generic ToolCallBlock. While the loop is paused awaiting the user,
-          // pendingAsk contains the call id → render the interactive form.
-          // Once a result has landed, render the read-only answer summary.
           if (tc.name == 'ask_user') {
             final result = resultByToolCall[tc.id];
             if (result != null) {
@@ -651,7 +655,7 @@ class _TurnCluster extends ConsumerWidget {
                 call: tc,
                 resultContent: result,
               ));
-            } else {
+            } else if (pendingAsk.contains(tc.id)) {
               final spec = AskUserSpec.tryParse(tc);
               if (spec != null) {
                 children.add(AskUserCard(
@@ -660,6 +664,15 @@ class _TurnCluster extends ConsumerWidget {
                   spec: spec,
                 ));
               }
+            } else {
+              // Args still streaming — show the placeholder block until the
+              // loop pauses and the spec is fully resolved.
+              children.add(ToolCallBlock(
+                key: ValueKey('tc_${tc.id}'),
+                call: tc,
+                resultContent: null,
+                streaming: true,
+              ));
             }
             continue;
           }

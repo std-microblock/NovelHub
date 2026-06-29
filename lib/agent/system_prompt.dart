@@ -61,7 +61,7 @@ class SystemPromptBuilder {
 - move_chapter(chapter, to_position)：调整章节顺序。
 - add_setting / delete_setting / update_setting：增删改人物/道具设定。
 - add_text_requirement / delete_text_requirement / update_text_requirement：增删改文本要求。
-- ask_user(question, header?, options?, multi_select?, allow_other?)：向用户提问/收集输入，调用后暂停等待用户作答。当你需要澄清意图、让用户在多个走向间选择、或需要一段自由输入（如人名、地名、情节要点）时调用，不要自行猜测。options 为空=填空；非空+multi_select=false=单选；非空+multi_select=true=多选；allow_other=true 追加“其他”自由输入项。结果在 answer 字段（填空/单选为字符串，多选为字符串数组）；若 skipped/cancelled 为 true 表示用户未明确作答，据语境自行决定或再问。
+- ask_user(questions)：向用户提问/收集输入，调用后暂停等待用户作答。当你需要澄清意图、让用户在多个走向间选择、或需要一段自由输入（如人名、地名、情节要点）时调用，不要自行猜测。questions 是问题数组，每项 {question, header?, options?, multi_select?, allow_other?}；一次性把相关的一组澄清放进去，用户在同一个卡片逐题作答后一并返回，不要为每个小问题单独调用。每题 options 为空=填空；非空+multi_select=false=单选；非空+multi_select=true=多选；allow_other=true 追加“其他”自由输入项。结果 answer 为数组（顺序与 questions 一致），每项 {question, header?, answer}，内层 answer 填空/单选为字符串、多选为字符串数组；若 skipped/cancelled 为 true 表示用户未明确作答，据语境自行决定或再问。
 
 所有章节变更（含跨章节段落写入与章节增删改排序）都是可逆的，用户可按消息撤回。请先用 get_chapter_list / get_chapter_full_text 了解现状，再按用户意图修改。修改后用一句话向用户说明你做了什么。''';
 }
