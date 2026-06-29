@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:animated_streaming_markdown/animated_streaming_markdown.dart';
+import 'package:flutter/services.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -127,12 +129,12 @@ class _MessageTileState extends State<MessageTile>
             isUser
                 ? _RichUserContent(content: m.content, fgColor: fgColor)
                 : _MarkdownContent(
-                    // Key by streaming state so the widget fully remounts
-                    // when streaming flips to false (turn ends), instead of
-                    // toggling enableSelection in place — which raced the
-                    // SelectionContainer layout. Streaming: animation on,
-                    // selection off. Settled: static render, selection on.
-                    key: ValueKey('md_${m.id}_${widget.streaming}'),
+                    // Stable key across the streaming→settled transition: we
+                    // no longer remount at turn end (the old package needed a
+                    // remount to toggle selection safely; gpt_markdown renders
+                    // plain Text.rich in both states, so we just keep it
+                    // mounted and avoid the end-of-turn flash).
+                    key: ValueKey('md_${m.id}'),
                     data: m.content,
                     fgColor: fgColor,
                     theme: Theme.of(context),
@@ -842,22 +844,36 @@ class _RichUserContent extends StatelessWidget {
   }
 }
 
-/// Assistant content rendered as streaming Markdown via
-/// [animated_streaming_markdown].
+/// Assistant content rendered as streaming Markdown on top of [gpt_markdown].
 ///
-/// Standard streaming usage (per the package's chat example): keep ONE
-/// [MarkdownStreamParser] alive for the message's lifetime, feed each new
-/// text suffix via `parser.append(delta)`, and hand `result.blocks` to
-/// [AnimatedStreamingMarkdown]. The renderer keys blocks by a stable
-/// `_blockIdentity`, so already-visible blocks are reused (not re-revealed)
-/// across updates — only genuinely new blocks animate in.
+/// `gpt_markdown` is a whole-string parser — it exposes no incremental API,
+/// so feeding it the full accumulated text on every token delta would
+/// re-parse the *entire* document each tick and reflow everything (the
+/// classic streaming flicker). To avoid that we split the accumulated text
+/// into two parts:
 ///
-/// `widget.data` is the fully-accumulated assistant text so far, not a single
-/// chunk, so we track the previously-applied length and append only the suffix.
+///  * **frozen blocks** — complete Markdown blocks (paragraphs, list items,
+///    closed code fences, …) separated by blank lines. Each is handed to its
+///    own [GptMarkdown] with a content-derived [ValueKey]. Once a block's
+///    text stops changing its key is stable, so `gpt_markdown`'s internal
+///    `MdWidget.didUpdateWidget` short-circuits (it only regenerates spans
+///    when `exp` changes) and the block never re-parses or reflows again.
+///
+///  * **the tail** — the single still-growing block at the end. This is the
+///    only widget that re-parses per delta, and because it's small (one
+///    paragraph / list item / open fence) its reflow is confined to the
+///    bottom and visually imperceptible.
+///
+/// Both states render as plain `Text.rich` (no selection) — there is no
+/// streaming-vs-settled remount; the widget stays mounted across the
+/// transition. Copying full content still works via the 「复制」 action chip.
+///
 /// Token deltas arrive many times per frame; we coalesce them via a short
-/// throttle so we don't parse+set state per token.
+/// throttle while streaming so we don't split+set state per token. When
+/// settled (turn ended) updates flush immediately.
 ///
-/// Code blocks get a dark, readable background regardless of the bubble color.
+/// Code blocks get a dark, readable background regardless of the bubble
+/// color via the custom [codeBuilder].
 class _MarkdownContent extends StatefulWidget {
   final String data;
   final Color fgColor;
@@ -876,89 +892,92 @@ class _MarkdownContent extends StatefulWidget {
 }
 
 class _MarkdownContentState extends State<_MarkdownContent> {
-  final MarkdownStreamParser _parser = MarkdownStreamParser();
-  List<MarkdownRenderNode> _blocks = const [];
-  bool _parserReady = false;
+  // Frozen complete blocks (each rendered by its own stable-keyed
+  // GptMarkdown) + the single still-growing tail block.
+  List<String> _frozen = const [];
+  String _tail = '';
 
-  // Text already fed into the parser. We append only the suffix beyond this
-  // each update; if the new text doesn't extend it (shrank / edited in place)
-  // we `replace` the whole buffer (resets parser state).
+  // The text the current split is based on. If a new `data` doesn't extend
+  // this (it shrank / was edited / regenerated) we reset and re-split from
+  // scratch.
   String _applied = '';
 
-  // Coalesce rapid token deltas: re-parse at most once per interval. The last
-  // delta within a window wins; the final settle flushes immediately.
+  // Coalesce rapid token deltas: re-split at most once per interval while
+  // streaming. The last delta in a window wins; settling flushes immediately.
   Timer? _pumpTimer;
   bool _pumpScheduled = false;
-  static const _pumpInterval = Duration(milliseconds: 40);
+  static const _pumpInterval = Duration(milliseconds: 30);
 
-  // Cached theme. The package folds `markdownTheme.hashCode` (identity-based)
-  // into each block's signature, so rebuilding the theme object every frame
-  // would invalidate *every* block's signature and force a full re-render
-  // every delta — the main source of the "everything re-renders" lag. Rebuild
-  // it only when fgColor / theme actually change.
-  StreamingMarkdownThemeData? _theme;
-  Color? _themeFg;
-  Brightness? _themeBrightness;
+  // Cached text style + gpt theme. Rebuilding these objects every frame
+  // would change their identity and force every dependent widget to
+  // rebuild/re-parse on each delta — the main source of per-delta lag.
+  TextStyle? _style;
+  GptMarkdownThemeData? _gptTheme;
+  Color? _styleFg;
+  Brightness? _styleBrightness;
+  CodeBlockBuilder? _codeBuilder;
 
-  StreamingMarkdownThemeData _resolveTheme() {
+  void _resolveStyle() {
     final fg = widget.fgColor;
     final brightness = widget.theme.brightness;
-    if (_theme != null && _themeFg == fg && _themeBrightness == brightness) {
-      return _theme!;
+    if (_style != null &&
+        _styleFg == fg &&
+        _styleBrightness == brightness &&
+        _codeBuilder != null) {
+      return;
     }
+    _style = TextStyle(color: fg, height: 1.5, fontSize: 14);
     final codeBg = brightness == Brightness.dark
         ? Colors.black.withValues(alpha: 0.35)
         : Colors.black.withValues(alpha: 0.06);
     final codeFg = brightness == Brightness.dark
         ? Colors.green.shade200
         : const Color(0xFF8E2DE2);
-    _theme = StreamingMarkdownThemeData(
-      blockSpacing: 8,
-      paragraphTextStyle:
-          TextStyle(color: fg, height: 1.5, fontSize: 14),
-      linkTextStyle: TextStyle(color: widget.theme.colorScheme.primary),
-      inlineCodeTextStyle: TextStyle(
-        backgroundColor: codeBg,
-        color: codeFg,
-        fontFamily: "monospace",
-        fontSize: 13,
-        height: 1.4,
-      ),
-      inlineCodeBackgroundColor: codeBg,
-      codeBlockBackgroundColor: codeBg,
-      codeBlockTextStyle: TextStyle(
-        color: codeFg,
-        fontFamily: "monospace",
-        fontSize: 13,
-        height: 1.4,
-      ),
-      quoteBackgroundColor: fg.withValues(alpha: 0.06),
-      thematicBreakColor: fg.withValues(alpha: 0.3),
+    _codeBuilder = (context, name, code, closed) => _CodeBlock(
+          name: name,
+          code: code,
+          codeBg: codeBg,
+          codeFg: codeFg,
+        );
+    _gptTheme = GptMarkdownThemeData(
+      brightness: brightness,
+      linkColor: widget.theme.colorScheme.primary,
+      linkHoverColor: widget.theme.colorScheme.primary,
+      hrLineColor: fg.withValues(alpha: 0.3),
+      highlightColor: fg.withValues(alpha: 0.06),
+      // Don't auto-insert a divider line after `#` headings — it reads as
+      // noise inside a chat bubble.
+      autoAddDividerLineAfterH1: false,
     );
-    _themeFg = fg;
-    _themeBrightness = brightness;
-    return _theme!;
+    _styleFg = fg;
+    _styleBrightness = brightness;
   }
 
   @override
   void initState() {
     super.initState();
-    _parser.start().then((_) {
-      if (!mounted) return;
-      _parserReady = true;
-      _apply(widget.data);
-    });
+    _rebuild(widget.data);
   }
 
   @override
   void didUpdateWidget(covariant _MarkdownContent oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data == oldWidget.data) return;
-    if (!_parserReady) return;
-    // Streaming (or rapid updates): throttle. Settled (data stopped changing
-    // + not streaming) also goes through the same path; the throttle just
-    // defers by at most _pumpInterval, which is imperceptible on settle.
-    _schedulePump();
+    if (widget.data == oldWidget.data &&
+        widget.fgColor == oldWidget.fgColor &&
+        widget.theme.brightness == oldWidget.theme.brightness) {
+      return;
+    }
+    if (widget.data == oldWidget.data) {
+      // Only style/theme changed → just rebuild, no re-split needed.
+      return;
+    }
+    // Streaming: throttle so we don't split+set state per token. Settled
+    // (turn ended) updates flush immediately.
+    if (widget.streaming) {
+      _schedulePump();
+    } else {
+      _rebuild(widget.data);
+    }
   }
 
   void _schedulePump() {
@@ -967,92 +986,213 @@ class _MarkdownContentState extends State<_MarkdownContent> {
     _pumpTimer = Timer(_pumpInterval, () {
       _pumpScheduled = false;
       if (!mounted) return;
-      _apply(widget.data);
+      _rebuild(widget.data);
     });
   }
 
-  bool _applying = false;
-  bool _needsReapply = false;
-
-  Future<void> _apply(String data) async {
-    if (_applying) {
-      // A newer update arrived while a parse was in flight; re-apply the
-      // latest data once it resolves (avoids dropping the final delta and
-      // prevents two concurrent appends racing on the parser).
-      _needsReapply = true;
-      return;
+  void _rebuild(String data) {
+    // If the new text doesn't extend what we already split (it shrank, was
+    // edited, or the message was regenerated) reset and re-split from zero.
+    if (!data.startsWith(_applied)) {
+      _applied = '';
     }
-    _applying = true;
-    try {
-      await _applyOnce(data);
-    } finally {
-      _applying = false;
-    }
+    final (frozen, tail) = _splitBlocks(data);
+    _applied = data;
     if (!mounted) return;
-    if (_needsReapply) {
-      _needsReapply = false;
-      _apply(widget.data);
-    }
+    setState(() {
+      _frozen = frozen;
+      _tail = tail;
+    });
   }
 
-  Future<void> _applyOnce(String data) async {
-    if (data.startsWith(_applied) && data.length >= _applied.length) {
-      // Extends the previously-applied text → feed only the new suffix
-      // (incremental parse; existing blocks keep their identity).
-      final delta = data.substring(_applied.length);
-      if (delta.isEmpty) return;
-      final r = await _parser.append(delta);
-      if (!mounted) return;
-      _applied = data;
-      setState(() => _blocks = r.blocks);
-    } else {
-      // Shrank / non-append change → reset and reparse whole buffer.
-      final r = await _parser.replace(data);
-      if (!mounted) return;
-      _applied = data;
-      setState(() => _blocks = r.blocks);
+  /// Split accumulated Markdown into complete blocks + a single growing tail.
+  ///
+  /// A "block" is text up to and including a blank line. Closed fenced code
+  /// blocks are frozen immediately even without a trailing blank line (the
+  /// closing ``` terminates the block). Everything after the last split point
+  /// is the tail — the only part that re-parses per delta.
+  static (List<String>, String) _splitBlocks(String data) {
+    final normalized = data.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final lines = normalized.split('\n');
+    final complete = <String>[];
+    final buffer = <String>[];
+    var inFence = false;
+    for (final line in lines) {
+      final isFence = RegExp(r'^\s*```').hasMatch(line);
+      buffer.add(line);
+      if (isFence) {
+        inFence = !inFence;
+        // Closing fence: the code block is complete even without a
+        // trailing blank line — freeze it now.
+        if (!inFence) {
+          complete.add(buffer.join('\n'));
+          buffer.clear();
+        }
+        continue;
+      }
+      // A blank line outside a fence ends the current block.
+      if (!inFence && line.trim().isEmpty) {
+        if (buffer.isNotEmpty) {
+          complete.add(buffer.join('\n'));
+          buffer.clear();
+        }
+      }
     }
+    final tail = buffer.join('\n');
+    // Drop a trailing-only tail (no content left to grow) so settled text
+    // doesn't keep an empty re-parsing widget mounted.
+    if (tail.trim().isEmpty && complete.isNotEmpty) {
+      return (complete, '');
+    }
+    return (complete, tail);
   }
 
   @override
   void dispose() {
     _pumpTimer?.cancel();
-    _parser.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = _resolveTheme();
-    final streaming = widget.streaming;
+    _resolveStyle();
+    final style = _style!;
+    final gptTheme = _gptTheme!;
+    final codeBuilder = _codeBuilder!;
+    final children = <Widget>[];
+    for (var i = 0; i < _frozen.length; i++) {
+      final b = _frozen[i];
+      if (b.trim().isEmpty) continue;
+      if (children.isNotEmpty) children.add(const SizedBox(height: 8));
+      children.add(GptMarkdown(
+        b,
+        key: ValueKey('blk_$i·${b.hashCode}'),
+        style: style,
+        codeBuilder: codeBuilder,
+      ));
+    }
+    if (_tail.trim().isNotEmpty) {
+      if (children.isNotEmpty) children.add(const SizedBox(height: 8));
+      children.add(GptMarkdown(
+        _tail,
+        key: const ValueKey('tail'),
+        style: style,
+        codeBuilder: codeBuilder,
+      ));
+    }
     // RepaintBoundary isolates the streaming markdown's per-frame repaints
     // from the rest of the message list.
     return RepaintBoundary(
-      child: AnimatedStreamingMarkdown(
-        blocks: _blocks,
-        theme: theme,
-        // Selection is off while streaming: the package recomputes its
-        // selection projection (O(n) over the whole doc) on every block
-        // change, and the progressive inline-proxy mounting races the
-        // SelectionContainer's layout scheduler. Once the turn ends the
-        // whole widget remounts (see the ValueKey in MessageTile) as a
-        // settled static view with selection re-enabled.
-        enableSelection: !streaming,
-        allowIncompleteInlineSyntax: true,
-        // Token-by-token fade-in *only while streaming*. For settled /
-        // historical messages we render fully static (duration zero +
-        // always-compact) so re-entering the view doesn't replay an
-        // animation on already-complete content.
-        tokenStaggerDelay:
-            streaming ? const Duration(milliseconds: 12) : Duration.zero,
-        tokenAnimationDuration:
-            streaming ? const Duration(milliseconds: 220) : Duration.zero,
-        tokenAnimationCurve: Curves.easeOut,
-        tokenCompaction: streaming
-            ? AnimatedMarkdownTokenCompaction.automatic
-            : AnimatedMarkdownTokenCompaction.always,
-        showCodeBlockCopyButton: true,
+      child: GptMarkdownTheme(
+        gptThemeData: gptTheme,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: children,
+        ),
       ),
+    );
+  }
+}
+
+/// A dark code block with a copy button, matching the old renderer's look
+/// regardless of the surrounding bubble color. Used as `codeBuilder` for
+/// [GptMarkdown].
+class _CodeBlock extends StatefulWidget {
+  final String name;
+  final String code;
+  final Color codeBg;
+  final Color codeFg;
+  const _CodeBlock({
+    required this.name,
+    required this.code,
+    required this.codeBg,
+    required this.codeFg,
+  });
+
+  @override
+  State<_CodeBlock> createState() => _CodeBlockState();
+}
+
+class _CodeBlockState extends State<_CodeBlock> {
+  bool _copied = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: widget.codeBg,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.name.isNotEmpty)
+            Padding(
+              padding:
+                  const EdgeInsets.only(left: 12, right: 4, top: 4),
+              child: Row(
+                children: [
+                  Text(
+                    widget.name,
+                    style: TextStyle(
+                      color: widget.codeFg.withValues(alpha: 0.6),
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                  const Spacer(),
+                  _copyButton(),
+                ],
+              ),
+            )
+          else
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 2, right: 2),
+                child: _copyButton(),
+              ),
+            ),
+          const SizedBox(height: 2),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: SelectableText(
+              widget.code,
+              style: TextStyle(
+                color: widget.codeFg,
+                fontFamily: 'monospace',
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _copyButton() {
+    return IconButton(
+      icon: Icon(
+        _copied ? Icons.check : Icons.copy_outlined,
+        size: 16,
+        color: widget.codeFg.withValues(alpha: 0.7),
+      ),
+      tooltip: '复制代码',
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+      padding: EdgeInsets.zero,
+      onPressed: () async {
+        await Clipboard.setData(ClipboardData(text: widget.code));
+        if (!mounted) return;
+        setState(() => _copied = true);
+        await Future.delayed(const Duration(seconds: 2));
+        if (!mounted) return;
+        setState(() => _copied = false);
+      },
     );
   }
 }
