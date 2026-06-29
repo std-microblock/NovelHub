@@ -224,6 +224,17 @@ class NovelListNotifier extends StateNotifier<AsyncValue<List<Novel>>> {
     if (idx >= 0) list[idx] = novel;
     state = AsyncValue.data(list);
   }
+
+  Future<void> rename(String novelId, String title) async {
+    final t = title.trim();
+    if (t.isEmpty) return;
+    final list = [...?state.value];
+    final idx = list.indexWhere((n) => n.id == novelId);
+    if (idx < 0) return;
+    list[idx] = list[idx]..title = t;
+    await _repo.saveNovel(list[idx]);
+    state = AsyncValue.data(list);
+  }
 }
 
 String _uuid() => DateTime.now().microsecondsSinceEpoch.toRadixString(16);

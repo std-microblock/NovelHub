@@ -241,6 +241,53 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     return chapterId;
   }
 
+  /// Rename a chapter (manual, UI-driven). Mirrors the agent's
+  /// `rename_chapter` tool path so manual renames are undo-consistent.
+  Future<void> renameChapter(String chapterId, String title) async {
+    final t = title.trim();
+    if (t.isEmpty) return;
+    state.novelDoc.renameChapter(
+      chapter: chapterId,
+      title: t,
+      messageId: 'manual-${_tick()}',
+    );
+    final chapter =
+        state.novel.chapters.firstWhere((c) => c.id == chapterId);
+    state = state.copyWith(novel: state.novel, chapter: chapter);
+    _bump();
+    await persistNovel();
+  }
+
+  /// Delete a chapter (manual, UI-driven). Refuses the last remaining chapter
+  /// (same guard as NovelDoc.deleteChapter). After deletion switches to the
+  /// first remaining chapter.
+  Future<void> deleteChapter(String chapterId) async {
+    if (state.novel.chapters.length <= 1) return;
+    final remaining =
+        state.novel.chapters.where((c) => c.id != chapterId).toList();
+    state.novelDoc.deleteChapter(
+      chapter: chapterId,
+      messageId: 'manual-${_tick()}',
+    );
+    selectChapter(remaining.first.id);
+    _bump();
+    await persistNovel();
+  }
+
+  /// Move a chapter to [toPosition] (1-based, manual). Mirrors the agent's
+  /// `move_chapter` tool path.
+  Future<void> moveChapter(String chapterId, int toPosition) async {
+    state.novelDoc.moveChapter(
+      chapter: chapterId,
+      toPosition: toPosition,
+      messageId: 'manual-${_tick()}',
+    );
+    state = state.copyWith(
+        novel: state.novel, chapter: _currentChapter(state.novel));
+    _bump();
+    await persistNovel();
+  }
+
   // --- doc edits from the editor (edit mode) ---
 
   /// Replace the whole chapter body from a single text field. Paragraphs are

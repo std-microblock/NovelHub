@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/providers.dart';
+import '../prompt_string.dart';
 import '../settings/settings_page.dart';
 
 /// Left navigation drawer: novel list (create / duplicate / delete /
@@ -39,11 +40,24 @@ class NovelDrawer extends ConsumerWidget {
                     },
                     trailing: PopupMenuButton<String>(
                       itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'rename', child: Text('重命名')),
                         PopupMenuItem(value: 'dup', child: Text('复制')),
                         PopupMenuItem(value: 'del', child: Text('删除')),
                       ],
                       onSelected: (v) async {
-                        if (v == 'dup') {
+                        if (v == 'rename') {
+                          final title = await promptString(
+                            context,
+                            title: '重命名小说',
+                            initial: n.title,
+                            confirmLabel: '保存',
+                          );
+                          if (title != null && title.isNotEmpty) {
+                            await ref
+                                .read(novelListProvider.notifier)
+                                .rename(n.id, title);
+                          }
+                        } else if (v == 'dup') {
                           await ref
                               .read(novelListProvider.notifier)
                               .duplicate(n.id);
@@ -83,7 +97,12 @@ class NovelDrawer extends ConsumerWidget {
             leading: const Icon(Icons.add),
             title: const Text('新建小说'),
             onTap: () async {
-              final title = await _promptTitle(context);
+              final title = await promptString(
+                context,
+                title: '新建小说',
+                hint: '小说标题',
+                confirmLabel: '创建',
+              );
               if (title != null && title.isNotEmpty) {
                 final novel = await ref
                     .read(novelListProvider.notifier)
@@ -103,29 +122,6 @@ class NovelDrawer extends ConsumerWidget {
                 MaterialPageRoute(builder: (_) => const SettingsPage()),
               );
             },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<String?> _promptTitle(BuildContext context) async {
-    final ctrl = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('新建小说'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: '小说标题'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, ctrl.text.trim()),
-            child: const Text('创建'),
           ),
         ],
       ),

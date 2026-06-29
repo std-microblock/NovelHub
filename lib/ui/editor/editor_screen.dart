@@ -7,6 +7,7 @@ import 'editor_pane.dart';
 import 'agent/agent_pane.dart';
 import 'novel_list/novel_drawer.dart';
 import 'novel_settings/novel_settings_page.dart';
+import 'prompt_string.dart';
 
 /// The main screen: top bar (chapter switch + edit/select toggle),
 /// upper editor pane, lower agent pane. Left drawer = novel list; right
@@ -172,29 +173,14 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   }
 
   Future<void> _promptNewChapter(BuildContext context) async {
-    final ctrl = TextEditingController();
     final chapters = ref.read(editorStateProvider).novel.chapters;
-    ctrl.text = '第${chapters.length + 1}章';
-    ctrl.selection = TextSelection(
-        baseOffset: 0, extentOffset: ctrl.text.length);
-    final title = await showDialog<String>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('新增章节'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: '章节标题'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, ctrl.text.trim()),
-            child: const Text('创建'),
-          ),
-        ],
-      ),
+    final initial = '第${chapters.length + 1}章';
+    final title = await promptString(
+      context,
+      title: '新增章节',
+      hint: '章节标题',
+      initial: initial,
+      confirmLabel: '创建',
     );
     if (title != null && title.isNotEmpty && context.mounted) {
       await ref.read(editorStateProvider.notifier).addChapter(title);
@@ -202,30 +188,38 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   }
 
   Widget _chapterSwitch(EditorState editor) {
-    final chapters = editor.novel.chapters;
+    final chapter = editor.chapter;
     return ConstrainedBox(
-      // Bound the dropdown width so a long chapter title can't blow up the
-      // AppBar layout — it ellipsizes instead.
       constraints: const BoxConstraints(maxWidth: 220),
-      child: DropdownButton<String>(
-        value: editor.chapter.id,
-        underline: const SizedBox(),
-        isExpanded: true,
-        items: [
-          for (final c in chapters)
-            DropdownMenuItem(
-              value: c.id,
+      child: TextButton(
+        onPressed: () => _openChapterManager(context, editor),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
               child: Text(
-                '${c.title} · ${c.paragraphs.length}段',
+                '${chapter.title} · ${chapter.paragraphs.length}段',
                 overflow: TextOverflow.ellipsis,
                 maxLines: 1,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
             ),
-        ],
-        onChanged: (id) {
-          if (id == null) return;
-          ref.read(editorStateProvider.notifier).selectChapter(id);
-        },
+            const Icon(Icons.arrow_drop_down),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openChapterManager(
+      BuildContext context, EditorState editor) async {
+    await showDialog<void>(
+      context: context,
+      builder: (c) => _ChapterManagerDialog(
+        editor: editor,
+        notifier: ref.read(editorStateProvider.notifier),
       ),
     );
   }
@@ -323,4 +317,141 @@ class _TopRoundClipper extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(_TopRoundClipper old) => old.top != top;
+}
+
+/// Chapter management dialog: lists every chapter with inline rename /
+/// reorder / delete actions plus a header button to add a new chapter.
+/// Tapping a row switches to that chapter and closes the dialog.
+///
+/// It rebuilds from the live [EditorState] on every notifier change so the
+/// list reflects renames / reorders / deletions immediately.
+class _ChapterManagerDialog extends ConsumerWidget {
+  final EditorState editor;
+  final EditorStateNotifier notifier;
+
+  const _ChapterManagerDialog({required this.editor, required this.notifier});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Re-read the live state so mutations performed from within the dialog
+    // (rename / move / delete) are reflected without reopening it.
+    final live = ref.watch(editorStateProvider);
+    final chapters = live.novel.chapters;
+    final currentId = live.chapter.id;
+    final canDelete = chapters.length > 1;
+
+    return AlertDialog(
+      title: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          const Text('章节管理'),
+          TextButton.icon(
+            icon: const Icon(Icons.add),
+            label: const Text('新增'),
+            onPressed: () async {
+              final initial = '第${chapters.length + 1}章';
+              final title = await promptString(
+                context,
+                title: '新增章节',
+                hint: '章节标题',
+                initial: initial,
+                confirmLabel: '创建',
+              );
+              if (title != null && title.isNotEmpty) {
+                await notifier.addChapter(title);
+              }
+            },
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: ListView.builder(
+          shrinkWrap: true,
+          itemCount: chapters.length,
+          itemBuilder: (c, i) {
+            final ch = chapters[i];
+            final selected = ch.id == currentId;
+            return ListTile(
+              selected: selected,
+              leading: Text('${i + 1}',
+                  style: const TextStyle(color: Colors.grey)),
+              title: Text(ch.title,
+                  overflow: TextOverflow.ellipsis, maxLines: 1),
+              subtitle: Text('${ch.paragraphs.length}段'),
+              onTap: () {
+                notifier.selectChapter(ch.id);
+                Navigator.pop(c);
+              },
+              trailing: PopupMenuButton<String>(
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                      value: 'rename', child: Text('重命名')),
+                  PopupMenuItem(
+                    value: 'up',
+                    enabled: i > 0,
+                    child: const Text('上移'),
+                  ),
+                  PopupMenuItem(
+                    value: 'down',
+                    enabled: i < chapters.length - 1,
+                    child: const Text('下移'),
+                  ),
+                  PopupMenuItem(
+                    value: 'del',
+                    enabled: canDelete,
+                    child: const Text('删除'),
+                  ),
+                ],
+                onSelected: (v) async {
+                  if (v == 'rename') {
+                    final title = await promptString(
+                      context,
+                      title: '重命名章节',
+                      initial: ch.title,
+                      confirmLabel: '保存',
+                    );
+                    if (title != null && title.isNotEmpty) {
+                      await notifier.renameChapter(ch.id, title);
+                    }
+                  } else if (v == 'up') {
+                    await notifier.moveChapter(ch.id, i);
+                  } else if (v == 'down') {
+                    await notifier.moveChapter(ch.id, i + 2);
+                  } else if (v == 'del') {
+                    final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (cc) => AlertDialog(
+                            title: const Text('删除章节'),
+                            content: Text(
+                                '删除「${ch.title}」及其全部段落？此操作不可撤销。'),
+                            actions: [
+                              TextButton(
+                                  onPressed: () =>
+                                      Navigator.pop(cc, false),
+                                  child: const Text('取消')),
+                              FilledButton(
+                                  onPressed: () =>
+                                      Navigator.pop(cc, true),
+                                  child: const Text('删除')),
+                            ],
+                          ),
+                        ) ??
+                        false;
+                    if (ok) await notifier.deleteChapter(ch.id);
+                  }
+                },
+              ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
 }
