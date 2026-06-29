@@ -40,6 +40,13 @@ class TurnSnapshot {
 
 typedef TurnUpdate = void Function(TurnSnapshot snapshot);
 
+/// Invoked when the model calls the `ask_user` tool. Must return the tool
+/// result JSON string (the `role:tool` message content the model will see
+/// next round), or `null` to signal the user cancelled the turn — in which
+/// case the loop aborts with what it has (same as a stream cancel).
+typedef AskUserHandler = Future<String?> Function(
+    ToolCall call, ToolContext ctx);
+
 class AgentLoop {
   final LlmClient client;
   final ToolRegistry registry;
@@ -71,6 +78,7 @@ class AgentLoop {
     required int now,
     required TurnUpdate onTurnUpdate,
     CancelToken? cancelToken,
+    AskUserHandler? onAskUser,
   }) async {
     final system = promptBuilder.build(novel: novel);
 
@@ -227,17 +235,42 @@ class AgentLoop {
       // Dispatch each tool call and feed results back. Tool result messages
       // are interleaved right after this assistant message.
       for (final tc in resp.toolCalls) {
-        final r = registry.dispatch(
-          ctx: toolCtxBase(),
-          toolCallId: tc.id,
-          name: tc.name,
-          argumentsJson: tc.arguments,
-        );
-        toolResults.add(r);
+        if (cancelToken?.cancelled ?? false) {
+          return TurnSnapshot(
+              messages: turnMessages, toolResults: toolResults);
+        }
+
+        // `ask_user` is the one tool that needs to pause and wait for the
+        // human: it is dispatched out-of-band via [onAskUser] instead of the
+        // synchronous [ToolRegistry.dispatch]. The handler returns the result
+        // JSON (or null if the user cancelled the whole turn).
+        final String resultJson;
+        final ToolDispatchResult dispatchResult;
+        if (tc.name == 'ask_user' && onAskUser != null) {
+          final r = await onAskUser(tc, toolCtxBase());
+          if (r == null) {
+            // User cancelled → end the turn (same as a stream cancel).
+            return TurnSnapshot(
+                messages: turnMessages, toolResults: toolResults);
+          }
+          resultJson = r;
+          dispatchResult = ToolDispatchResult(
+              toolCallId: tc.id, name: tc.name, resultJson: r);
+        } else {
+          final r = registry.dispatch(
+            ctx: toolCtxBase(),
+            toolCallId: tc.id,
+            name: tc.name,
+            argumentsJson: tc.arguments,
+          );
+          resultJson = r.resultJson;
+          dispatchResult = r;
+        }
+        toolResults.add(dispatchResult);
         final toolMsg = Message(
           id: tc.id,
           role: MessageRole.tool,
-          content: r.resultJson,
+          content: resultJson,
           toolCallId: tc.id,
           toolName: tc.name,
           turnId: userMessage.turnId,
@@ -246,7 +279,7 @@ class AgentLoop {
         turnMessages.add(toolMsg);
         llmHistory.add(LlmMessage(
           role: MessageRole.tool,
-          content: r.resultJson,
+          content: resultJson,
           toolCallId: tc.id,
         ));
         emit();

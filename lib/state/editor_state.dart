@@ -2,6 +2,9 @@
 /// orchestration of agent turns (send / resend / revert / clear context).
 library;
 
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/llm/streaming_retry.dart' show CancelToken;
@@ -35,6 +38,11 @@ class EditorState {
   /// `@@${<json>}$@@` tokens (see domain/rich_text.dart). Self-contained —
   /// no separate ref list needed.
   final String draftContent;
+  /// Tool-call ids of `ask_user` calls currently awaiting the user's answer.
+  /// Only populated while a turn is live and paused on a question. The UI
+  /// renders an interactive card for these; once answered the id leaves this
+  /// set and the persisted tool-result renders a read-only summary.
+  final Set<String> pendingAskUserIds;
 
   EditorState({
     required this.novel,
@@ -49,6 +57,7 @@ class EditorState {
     this.lastError,
     this.editingMessageId,
     this.draftContent = '',
+    this.pendingAskUserIds = const {},
   });
 
   /// The full chapter body as a single editable string (`\n\n`-joined).
@@ -68,6 +77,7 @@ class EditorState {
     Object? lastError = _sentinel,
     Object? editingMessageId = _sentinel,
     String? draftContent,
+    Set<String>? pendingAskUserIds,
   }) =>
       EditorState(
         novel: novel ?? this.novel,
@@ -87,6 +97,7 @@ class EditorState {
             ? this.editingMessageId
             : editingMessageId?.toString(),
         draftContent: draftContent ?? this.draftContent,
+        pendingAskUserIds: pendingAskUserIds ?? this.pendingAskUserIds,
       );
 }
 
@@ -98,6 +109,9 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   String? _novelId;
   String? _chapterId;
   CancelToken? _cancelToken;
+  /// Pending `ask_user` completers keyed by tool-call id. Each holds the loop
+  /// paused until the user answers / skips; completed with `null` on cancel.
+  final Map<String, Completer<String?>> _pendingAsk = {};
 
   EditorStateNotifier(this._ref)
       : super(EditorState(
@@ -425,7 +439,8 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
         streamingMessages: const [],
         lastError: null,
         draftContent: '',
-        editingMessageId: null);
+        editingMessageId: null,
+        pendingAskUserIds: const {});
 
     try {
       final loop = _ref.read(agentLoopProvider);
@@ -445,6 +460,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
           // is the in-progress one.
           state = state.copyWith(streamingMessages: snap.messages);
         },
+        onAskUser: (call, ctx) => _handleAskUser(call),
       );
       // Commit the turn's messages into the conversation and clear the
       // streaming list IN THE SAME state update so the UI never renders
@@ -460,7 +476,8 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
       state = state.copyWith(
           agentRunning: false,
           streamingMessages: const [],
-          lastError: null);
+          lastError: null,
+          pendingAskUserIds: const {});
       await persistNovel();
     } catch (e) {
       // Commit whatever was streamed before the failure so the user sees it.
@@ -476,6 +493,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
         agentRunning: false,
         streamingMessages: const [],
         lastError: e,
+        pendingAskUserIds: const {},
       );
     }
   }
@@ -486,6 +504,61 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   void stop() {
     if (!state.agentRunning) return;
     _cancelToken?.cancel();
+    // If we're paused on an ask_user, unblock the loop with null so it
+    // returns the partial turn (the cancel branch ends the turn).
+    _failAllPendingAsk();
+  }
+
+  // --- ask_user: pause the loop for a human answer ---
+
+  Future<String?> _handleAskUser(ToolCall call) async {
+    final completer = Completer<String?>();
+    _pendingAsk[call.id] = completer;
+    // Surface this call as pending so the UI swaps the ToolCallBlock for an
+    // interactive card. The streaming snapshot (already emitted) carries the
+    // assistant message + toolCalls; we just flag which callId is awaiting.
+    state = state.copyWith(
+        pendingAskUserIds: {...state.pendingAskUserIds, call.id});
+    return completer.future;
+  }
+
+  /// User submitted an answer for [callId]. [answer] is the structured value
+  /// (string for fill-in / single-select; List<String> for multi-select).
+  void answerAskUser(String callId, Object answer) {
+    final completer = _pendingAsk.remove(callId);
+    if (completer == null || completer.isCompleted) return;
+    completer.complete(jsonEncode({
+      'ok': true,
+      'answer': answer,
+      'skipped': false,
+      'cancelled': false,
+    }));
+    state = state.copyWith(
+        pendingAskUserIds: state.pendingAskUserIds..remove(callId));
+  }
+
+  /// User tapped "skip" — no answer, but the model should continue.
+  void skipAskUser(String callId) {
+    final completer = _pendingAsk.remove(callId);
+    if (completer == null || completer.isCompleted) return;
+    completer.complete(jsonEncode({
+      'ok': false,
+      'answer': null,
+      'skipped': true,
+      'cancelled': false,
+    }));
+    state = state.copyWith(
+        pendingAskUserIds: state.pendingAskUserIds..remove(callId));
+  }
+
+  void _failAllPendingAsk() {
+    if (_pendingAsk.isEmpty) return;
+    final pending = List.of(_pendingAsk.entries);
+    _pendingAsk.clear();
+    for (final e in pending) {
+      if (!e.value.isCompleted) e.value.complete(null);
+    }
+    state = state.copyWith(pendingAskUserIds: const {});
   }
 
   /// Jump the timeline back to the state at [messageId] without resending.

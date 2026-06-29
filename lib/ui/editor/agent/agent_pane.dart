@@ -9,6 +9,7 @@ import '../../../domain/conversation.dart' show Message, MessageRole;
 import '../../../domain/rich_text.dart';
 import '../../../state/editor_state.dart';
 import '../../../state/providers.dart';
+import 'ask_user_card.dart';
 import 'message_tile.dart';
 import 'ref_badge.dart';
 import 'rich_text_controller.dart';
@@ -638,6 +639,30 @@ class _TurnCluster extends ConsumerWidget {
       ));
       if (m.role == MessageRole.assistant) {
         for (final tc in m.toolCalls) {
+          // ask_user gets its own interactive / answered card instead of the
+          // generic ToolCallBlock. While the loop is paused awaiting the user,
+          // pendingAsk contains the call id → render the interactive form.
+          // Once a result has landed, render the read-only answer summary.
+          if (tc.name == 'ask_user') {
+            final result = resultByToolCall[tc.id];
+            if (result != null) {
+              children.add(AskUserAnswered(
+                key: ValueKey('au_${tc.id}'),
+                call: tc,
+                resultContent: result,
+              ));
+            } else {
+              final spec = AskUserSpec.tryParse(tc);
+              if (spec != null) {
+                children.add(AskUserCard(
+                  key: ValueKey('au_${tc.id}'),
+                  call: tc,
+                  spec: spec,
+                ));
+              }
+            }
+            continue;
+          }
           // The tool call is "streaming" (args arriving or result pending)
           // while this turn is the live one AND its result hasn't landed yet.
           // We broaden beyond `streaming` (which only covers the assistant-
