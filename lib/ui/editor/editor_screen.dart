@@ -309,21 +309,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     );
   }
 
-  Future<void> _promptNewChapter(BuildContext context) async {
-    final chapters = ref.read(editorStateProvider).novel.chapters;
-    final initial = '第${chapters.length + 1}章';
-    final title = await promptString(
-      context,
-      title: '新增章节',
-      hint: '章节标题',
-      initial: initial,
-      confirmLabel: '创建',
-    );
-    if (title != null && title.isNotEmpty && context.mounted) {
-      await ref.read(editorStateProvider.notifier).addChapter(title);
-    }
-  }
-
   Widget _chapterSwitch(EditorState editor) {
     final chapter = editor.chapter;
     return ConstrainedBox(
