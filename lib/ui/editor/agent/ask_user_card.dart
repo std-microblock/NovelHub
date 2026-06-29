@@ -114,6 +114,13 @@ class AskUserCard extends ConsumerStatefulWidget {
 class _AskUserCardState extends ConsumerState<AskUserCard> {
   final List<_QState> _states = [];
   int _index = 0;
+  // Horizontal scroll controller for the question tab bar. When a call carries
+  // many questions the chips no longer fit, so the bar scrolls instead of
+  // squishing every label into a sliver.
+  final ScrollController _tabScrollCtrl = ScrollController();
+  // Attached to the currently-selected chip so we can ensureVisible it after
+  // switching tabs.
+  final GlobalKey _currentTabKey = GlobalKey();
 
   @override
   void initState() {
@@ -145,6 +152,7 @@ class _AskUserCardState extends ConsumerState<AskUserCard> {
 
   @override
   void dispose() {
+    _tabScrollCtrl.dispose();
     for (final s in _states) {
       s.dispose();
     }
@@ -164,6 +172,24 @@ class _AskUserCardState extends ConsumerState<AskUserCard> {
 
   void _skip() {
     ref.read(editorStateProvider.notifier).skipAskUser(widget.call.id);
+  }
+
+  /// Switch to question [i] and scroll the tab bar so the now-selected chip
+  /// lands near the centre of the strip (it may be off-screen when there are
+  /// many questions).
+  void _goToTab(int i) {
+    if (i == _index) return;
+    setState(() => _index = i);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _currentTabKey.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.5,
+          duration: const Duration(milliseconds: 160),
+        );
+      }
+    });
   }
 
   @override
@@ -211,7 +237,7 @@ class _AskUserCardState extends ConsumerState<AskUserCard> {
             children: [
               if (spec.isMulti && _index > 0)
                 TextButton(
-                  onPressed: () => setState(() => _index--),
+                  onPressed: () => _goToTab(_index - 1),
                   child: const Text('上一题'),
                 )
               else
@@ -245,28 +271,40 @@ class _AskUserCardState extends ConsumerState<AskUserCard> {
         borderRadius: BorderRadius.circular(6),
       ),
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
-      child: Row(
-        children: [
-          for (var i = 0; i < spec.questions.length; i++)
-            Expanded(
-              child: _tabChip(
+      // Scroll horizontally instead of Expanded-splitting: with many
+      // questions each chip kept a usable width and overflows scroll instead
+      // of clipping. mainAxisSize.min so chips size to their labels.
+      child: SingleChildScrollView(
+        controller: _tabScrollCtrl,
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < spec.questions.length; i++)
+              _tabChip(
                 scheme,
+                key: i == _index ? _currentTabKey : null,
                 label: _tabLabel(spec.questions[i], i),
                 selected: i == _index,
-                onTap: () => setState(() => _index = i),
+                onTap: () => _goToTab(i),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
   Widget _tabChip(ColorScheme scheme,
-      {required String label, required bool selected, required VoidCallback onTap}) {
+      {Key? key,
+      required String label,
+      required bool selected,
+      required VoidCallback onTap}) {
     return InkWell(
+      key: key,
       onTap: onTap,
       borderRadius: BorderRadius.circular(4),
       child: Container(
+        constraints: const BoxConstraints(minWidth: 52),
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
         decoration: BoxDecoration(
           color: selected
