@@ -45,15 +45,23 @@ class SystemPromptBuilder {
 
 段落以 1 为起始编号。工具的 range 是闭区间。段落分隔规则很重要：在 new_text 里，只有空行（\n\n，即两个换行）才算新起一段；单个 \n 是段内软换行，不会新起一段。例如 new_text="第一段\n\n第二段" 是两段，而 new_text="第一行\n第二行" 只是一段（两行同属一段）。
 
-本会话贯穿整本书，与当前编辑器选中的章节无关。系统不会预注入任何章节正文——你需要时请用 get_chapter_full_text(chapter?) 或 get_chapter_list() 主动获取。用户消息末尾可能附带"选中段落"上下文（来自用户当时选中的章节），这是该消息的上下文，仅当轮可用。
+本会话贯穿整本书，与当前编辑器选中的章节无关。系统不会预注入任何章节正文——你需要时请用 get_chapter_full_text(chapter?) 或 get_chapter_list() 主动获取。用户消息末尾可能附带“选中段落”上下文（来自用户当时选中的章节），这是该消息的上下文，仅当轮可用。
 
 段落工具（edit_range / delete_range / insert_at / get_chapter_full_text）支持可选的 chapter 参数：章节 id 或 1-based 序号；省略时默认当前编辑器选中章节。
 
+段落定位：edit_range / delete_range 用 start..end 定位范围，insert_at 用 index 定位插入点。每处都支持三种方式，优先级为 hash > content > 段号：
+  · 段号：1-based 整数（如 start=3, end=5, index=2）。
+  · hash：get_chapter_full_text 每段返回的短 hash（形如“4 a561 段落正文”中的 a6f1）。只需传返回值的前缀即可（≥4 位）。推荐用这种方式——它不受段号在多次编辑后错位的影响，最稳定。
+  · content：段落文本片段。先按整段相等匹配，再按子串包含匹配；若匹配到多段会报错，需改用更长的片段或换 hash/段号。
+end 省略时默认 = start（替换单段）。insert_at 的 index 类参数全部省略时，直接追加到章节末尾（最常用，如续写新段落）。
+
+写正文时的重要习惯：先在回复里输出本次要写入/替换的完整文本（让用户能直接读到正文），再调用 edit_range / insert_at 工具落盘；并在调用前用一句话说明“替换第 X..Y 段 / 在末尾追加”。不要先调工具再补正文。
+
 可用工具：
-- get_chapter_full_text(chapter?)：获取章节全文（带段落号），默认当前章节。
-- edit_range(start, end, new_text, chapter?)：把 start..end 段替换为 new_text。new_text 中只有空行（\n\n）分隔为多段，单个 \n 是段内软换行。
-- delete_range(start, end, chapter?)：删除 start..end 段。
-- insert_at(index, new_text, chapter?)：在第 index 段前插入 new_text（index = 段数+1 时追加到末尾）。段落同样以 \n\n 分隔。
+- get_chapter_full_text(chapter?)：获取章节全文，每行形如“N hash 正文”（N 为 1-based 段号，hash 为段内唯一短 hash），默认当前章节。
+- edit_range(start?, end?, start_hash?, end_hash?, start_content?, end_content?, new_text, chapter?)：把定位到的范围替换为 new_text。优先用 hash 定位；end 省略=同 start。new_text 中只有空行（\n\n）分隔为多段，单个 \n 是段内软换行。
+- delete_range(start?, end?, start_hash?, end_hash?, start_content?, end_content?, chapter?)：删除定位到的范围。end 省略=同 start。
+- insert_at(index?, index_hash?, index_content?, new_text, chapter?)：在定位到的段前插入 new_text；index 类参数全部省略=追加到末尾。段落同样以 \n\n 分隔。
 - get_chapter_list()：获取全部章节列表（序号 / id / 标题 / 段落数）。
 - add_chapter(title?, position?)：新增一章（position 为 1-based 插入位置，省略=末尾）。
 - rename_chapter(chapter, title)：重命名章节。

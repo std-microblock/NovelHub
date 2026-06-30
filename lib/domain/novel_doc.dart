@@ -147,14 +147,129 @@ class NovelDoc {
 
   // --- paragraph ops (1-based, closed ranges) ---
 
-  /// Full text of [chapterId]'s paragraphs with 1-based numbers.
+  /// FNV-1a 32-bit hash of [text], as 8 lowercase hex chars. Stable across
+  /// sessions (no dependence on object identity or random seeds) so a hash
+  /// returned by [getFullText] reliably identifies a paragraph's text.
+  static String hashText(String text) {
+    var h = 0x811C9DC5; // FNV offset basis (32-bit)
+    for (final c in text.codeUnits) {
+      h ^= c;
+      h = (h * 0x01000193) & 0xFFFFFFFF; // FNV prime, masked to 32 bits
+    }
+    return h.toRadixString(16).padLeft(8, '0');
+  }
+
+  /// One display hash per paragraph of [chapterId], in order. Each is the
+  /// shortest prefix (>= 4 chars) of [hashText] that is unique within the
+  /// chapter, so the model can refer to a paragraph by a hash that won't
+  /// collide with any sibling. Empty chapter → empty list.
+  List<String> displayHashes(String chapterId) {
+    final ch = chapterById(chapterId);
+    if (ch == null) throw NovelDocException('chapter not found: $chapterId');
+    final full = ch.paragraphs.map((p) => hashText(p.text)).toList();
+    if (full.isEmpty) return const [];
+    // Find the minimal unique prefix length across all paragraphs at once.
+    var len = 4;
+    while (len <= 8) {
+      final seen = <String>{};
+      var unique = true;
+      for (final h in full) {
+        if (!seen.add(h.substring(0, len))) {
+          unique = false;
+          break;
+        }
+      }
+      if (unique) break;
+      len++;
+    }
+    // len may exceed 8 only if two paragraphs share the same full hash
+    // (identical text) — then no prefix distinguishes them; fall back to 8.
+    return full.map((h) => h.substring(0, len.clamp(4, 8))).toList();
+  }
+
+  /// Resolve a paragraph reference to a 1-based number within [chapterId].
+  /// Precedence: [hash] > [content] > [number]. [hash] matches the shortest
+  /// unique prefix of [hashText] (>= 4 chars) and must be unambiguous within
+  /// the chapter — a prefix matching multiple paragraphs throws, since the
+  /// caller should use a longer hash or a plain number instead. [content]
+  /// matches by trimmed full equality first, falling back to substring
+  /// containment. [number] is range-checked (1..[maxNumber], default = the
+  /// chapter's paragraph count). Returns null when nothing was provided.
+  int resolveParagraph({
+    required String chapterId,
+    String? hash,
+    String? content,
+    int? number,
+    int? maxNumber,
+  }) {
+    final ch = chapterById(chapterId);
+    if (ch == null) throw NovelDocException('chapter not found: $chapterId');
+    final paras = ch.paragraphs;
+
+    if (hash != null && hash.isNotEmpty) {
+      final h = hash.toLowerCase();
+      final matches = <int>[];
+      for (var i = 0; i < paras.length; i++) {
+        final full = hashText(paras[i].text);
+        if (full.startsWith(h)) matches.add(i + 1);
+      }
+      if (matches.isEmpty) {
+        throw NovelDocException(
+            'no paragraph matched hash "$hash" in chapter.');
+      }
+      if (matches.length > 1) {
+        throw NovelDocException(
+            'hash "$hash" matched ${matches.length} paragraphs '
+            '(numbers $matches); use a longer hash or a paragraph number.');
+      }
+      return matches.first;
+    }
+
+    if (content != null && content.isNotEmpty) {
+      final needle = content.trim();
+      // Exact (trimmed) equality first.
+      for (var i = 0; i < paras.length; i++) {
+        if (paras[i].text.trim() == needle) return i + 1;
+      }
+      // Then substring containment.
+      final subs = <int>[];
+      for (var i = 0; i < paras.length; i++) {
+        if (paras[i].text.contains(needle)) subs.add(i + 1);
+      }
+      if (subs.length == 1) return subs.first;
+      if (subs.isEmpty) {
+        throw NovelDocException(
+            'no paragraph contained the given content.');
+      }
+      throw NovelDocException(
+          'content matched ${subs.length} paragraphs (numbers $subs); '
+          'use a longer/unique snippet, a hash, or a paragraph number.');
+    }
+
+    if (number != null) {
+      final cap = maxNumber ?? paras.length;
+      if (number < 1 || number > cap) {
+        throw NovelDocException(
+            'paragraph number $number out of range (1..$cap).');
+      }
+      return number;
+    }
+
+    return 0; // nothing provided
+  }
+
+  /// Full text of [chapterId]'s paragraphs, one per line, prefixed with the
+  /// 1-based number and the paragraph's display hash, e.g. `4 a561 ...`.
+  /// The hash is the shortest unique prefix (>= 4 chars) of [hashText] within
+  /// the chapter, so it identifies a paragraph without collision.
   String getFullText(String chapterId) {
     final ch = chapterById(chapterId);
     if (ch == null) throw NovelDocException('chapter not found: $chapterId');
-    final buf = StringBuffer();
     final paras = ch.paragraphs;
+    final hashes = displayHashes(chapterId);
+    final buf = StringBuffer();
     for (var i = 0; i < paras.length; i++) {
-      buf.write('${i + 1} ${paras[i].text}');
+      buf.write('${i + 1} ${hashes[i]} ${paras[i].text}');
       if (i < paras.length - 1) buf.writeln();
     }
     return buf.toString();
@@ -243,7 +358,7 @@ class NovelDoc {
 
   NovelMutation insertParagraphs({
     required String chapterId,
-    required int index,
+    required int? index,
     required String newText,
     required String messageId,
     String? toolCallId,
@@ -251,20 +366,22 @@ class NovelDoc {
     final ch = chapterById(chapterId);
     if (ch == null) throw NovelDocException('chapter not found: $chapterId');
     final paras = ch.paragraphs;
-    if (index < 1 || index > paras.length + 1) {
+    // null index → append after the last paragraph.
+    final at = index ?? paras.length + 1;
+    if (at < 1 || at > paras.length + 1) {
       throw NovelDocException(
-          'insertParagraphs index=$index out of range (1..${paras.length + 1}).');
+          'insertParagraphs index=$at out of range (1..${paras.length + 1}).');
     }
     final replacement = _splitToParagraphs(newText);
-    paras.insertAll(index - 1, replacement);
+    paras.insertAll(at - 1, replacement);
     final ev = NovelMutation(
       id: _uuid.v4(),
       messageId: messageId,
       toolCallId: toolCallId,
       kind: NovelMutationKind.insertParagraphs,
       chapterId: chapterId,
-      start: index,
-      end: index + replacement.length - 1,
+      start: at,
+      end: at + replacement.length - 1,
       removed: const [],
       inserted: replacement.map((e) => e.copy()).toList(),
     );

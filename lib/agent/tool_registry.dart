@@ -79,34 +79,92 @@ class ToolRegistry {
         return _ok(toolCallId, name, {'text': ctx.novelDoc.getFullText(cid)});
       case 'edit_range':
         return _paragraphMut(ctx, toolCallId, name, args, (cid) {
+          final doc = ctx.novelDoc;
+          final start = doc.resolveParagraph(
+            chapterId: cid,
+            hash: args['start_hash'] as String?,
+            content: args['start_content'] as String?,
+            number: args['start'] as int?,
+          );
+          // end defaults to start (replace a single paragraph) when omitted.
+          final end = doc.resolveParagraph(
+            chapterId: cid,
+            hash: args['end_hash'] as String?,
+            content: args['end_content'] as String?,
+            number: args['end'] as int?,
+            maxNumber: doc.chapterById(cid)!.paragraphs.length,
+          );
+          final resolvedEnd = end == 0 ? start : end;
+          if (start == 0 || resolvedEnd == 0) {
+            throw NovelDocException(
+                'edit_range needs a start paragraph (number / hash / content).');
+          }
           final ev = ctx.novelDoc.editParagraphs(
             chapterId: cid,
-            start: args['start'] as int,
-            end: args['end'] as int,
+            start: start,
+            end: resolvedEnd,
             newText: args['new_text'] as String,
             messageId: ctx.messageId,
             toolCallId: toolCallId,
           );
           return ev;
-        }, summary: (cid) =>
-            '修改 ${ctx.novelDoc.chapterById(cid)?.title} 第 ${args['start']}-${args['end']} 段');
+        }, summary: (cid) {
+          final ch = ctx.novelDoc.chapterById(cid)?.title;
+          return '修改 $ch 第 ${args['start'] ?? args['start_hash'] ?? args['start_content']}'
+              '-${args['end'] ?? args['end_hash'] ?? args['end_content'] ?? '同'} 段';
+        });
       case 'delete_range':
         return _paragraphMut(ctx, toolCallId, name, args, (cid) {
+          final doc = ctx.novelDoc;
+          final start = doc.resolveParagraph(
+            chapterId: cid,
+            hash: args['start_hash'] as String?,
+            content: args['start_content'] as String?,
+            number: args['start'] as int?,
+          );
+          final end = doc.resolveParagraph(
+            chapterId: cid,
+            hash: args['end_hash'] as String?,
+            content: args['end_content'] as String?,
+            number: args['end'] as int?,
+            maxNumber: doc.chapterById(cid)!.paragraphs.length,
+          );
+          final resolvedEnd = end == 0 ? start : end;
+          if (start == 0) {
+            throw NovelDocException(
+                'delete_range needs a start paragraph (number / hash / content).');
+          }
           final ev = ctx.novelDoc.deleteParagraphs(
             chapterId: cid,
-            start: args['start'] as int,
-            end: args['end'] as int,
+            start: start,
+            end: resolvedEnd,
             messageId: ctx.messageId,
             toolCallId: toolCallId,
           );
           return ev;
-        }, summary: (cid) =>
-            '删除 ${ctx.novelDoc.chapterById(cid)?.title} 第 ${args['start']}-${args['end']} 段');
+        }, summary: (cid) {
+          final ch = ctx.novelDoc.chapterById(cid)?.title;
+          return '删除 $ch 第 ${args['start'] ?? args['start_hash'] ?? args['start_content']}'
+              '-${args['end'] ?? args['end_hash'] ?? args['end_content'] ?? '同'} 段';
+        });
       case 'insert_at':
         return _paragraphMut(ctx, toolCallId, name, args, (cid) {
+          final doc = ctx.novelDoc;
+          final hasLocator = args['index'] != null ||
+              args['index_hash'] != null ||
+              args['index_content'] != null;
+          final at = hasLocator
+              ? doc.resolveParagraph(
+                  chapterId: cid,
+                  hash: args['index_hash'] as String?,
+                  content: args['index_content'] as String?,
+                  number: args['index'] as int?,
+                  maxNumber: doc.chapterById(cid)!.paragraphs.length + 1,
+                )
+              : null; // null → append after the last paragraph
           final ev = ctx.novelDoc.insertParagraphs(
             chapterId: cid,
-            index: args['index'] as int,
+            index: at,
             newText: args['new_text'] as String,
             messageId: ctx.messageId,
             toolCallId: toolCallId,
@@ -114,7 +172,12 @@ class ToolRegistry {
           return ev;
         }, summary: (cid) {
           final lines = (args['new_text'] as String).split('\n\n').length;
-          return '插入 $lines 段于 ${ctx.novelDoc.chapterById(cid)?.title} 第 ${args['index']} 段前';
+          final ch = ctx.novelDoc.chapterById(cid)?.title;
+          final loc = args['index'] ??
+              args['index_hash'] ??
+              args['index_content'] ??
+              '末尾';
+          return '插入 $lines 段于 $ch 第 $loc 段前';
         });
 
       // --- chapter management ---

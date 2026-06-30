@@ -576,7 +576,13 @@ class _TextToolSpec {
   final String header; // one-line summary used when collapsed/streaming
   final int? start;
   final int? end;
+  final String? startHash;
+  final String? endHash;
+  final String? startContent;
+  final String? endContent;
   final int? index;
+  final String? indexHash;
+  final String? indexContent;
   final String? chapter;
   final String newText; // raw new_text (may be partial while streaming)
 
@@ -585,7 +591,13 @@ class _TextToolSpec {
     required this.header,
     this.start,
     this.end,
+    this.startHash,
+    this.endHash,
+    this.startContent,
+    this.endContent,
     this.index,
+    this.indexHash,
+    this.indexContent,
     this.chapter,
     required this.newText,
   });
@@ -611,26 +623,41 @@ class _TextToolSpec {
     }
     final newText = (args?['new_text'] as String?) ?? rawText;
     final chapter = args?['chapter']?.toString();
+
     String header;
     switch (name) {
       case 'edit_range':
-        final s = args?['start'];
-        final e = args?['end'];
-        header = '修改段落'
-            '${s != null ? " 第 $s-${e ?? s} 段" : ""}'
+        final range = formatRange(
+          args?['start'] as int?,
+          args?['end'] as int?,
+          args?['start_hash']?.toString(),
+          args?['end_hash']?.toString(),
+          args?['start_content']?.toString(),
+          args?['end_content']?.toString(),
+        );
+        header = '修改段落 $range'
             '${chapter != null ? " · $chapter" : ""}';
         break;
       case 'insert_at':
-        final i = args?['index'];
-        header = '插入段落'
-            '${i != null ? " 于第 $i 段前" : ""}'
+        final loc = formatLocator(
+          args?['index'] as int?,
+          args?['index_hash']?.toString(),
+          args?['index_content']?.toString(),
+          suffix: '前',
+        );
+        header = '插入段落 于$loc'
             '${chapter != null ? " · $chapter" : ""}';
         break;
       default: // delete_range
-        final s = args?['start'];
-        final e = args?['end'];
-        header = '删除段落'
-            '${s != null ? " 第 $s-${e ?? s} 段" : ""}'
+        final range = formatRange(
+          args?['start'] as int?,
+          args?['end'] as int?,
+          args?['start_hash']?.toString(),
+          args?['end_hash']?.toString(),
+          args?['start_content']?.toString(),
+          args?['end_content']?.toString(),
+        );
+        header = '删除段落 $range'
             '${chapter != null ? " · $chapter" : ""}';
         break;
     }
@@ -639,10 +666,49 @@ class _TextToolSpec {
       header: header,
       start: args?['start'] as int?,
       end: args?['end'] as int?,
+      startHash: args?['start_hash']?.toString(),
+      endHash: args?['end_hash']?.toString(),
+      startContent: args?['start_content']?.toString(),
+      endContent: args?['end_content']?.toString(),
       index: args?['index'] as int?,
+      indexHash: args?['index_hash']?.toString(),
+      indexContent: args?['index_content']?.toString(),
       chapter: chapter,
       newText: newText,
     );
+  }
+
+  /// Truncate a content snippet for display (keeps the first 8 chars + …).
+  static String _snip(String s) =>
+      s.length > 8 ? '${s.substring(0, 8)}…' : s;
+
+  /// Format a single paragraph locator for display, preferring hash > content
+  /// > number. [suffix] is appended (e.g. "前" for insert_at).
+  static String formatLocator(int? number, String? hash, String? content,
+      {String suffix = ''}) {
+    if (hash != null) return 'hash $hash$suffix';
+    if (content != null) return '「${_snip(content)}」$suffix';
+    if (number != null) return '第 $number 段$suffix';
+    return '末尾';
+  }
+
+  /// Format a start..end range for display. End omitted → single-paragraph
+  /// form (just the start locator).
+  static String formatRange(
+      int? startNum,
+      int? endNum,
+      String? startHash,
+      String? endHash,
+      String? startContent,
+      String? endContent) {
+    final s = formatLocator(startNum, startHash, startContent);
+    if (endNum == null &&
+        endHash == null &&
+        endContent == null) {
+      return s; // single paragraph
+    }
+    final e = formatLocator(endNum, endHash, endContent);
+    return '$s-$e';
   }
 
   /// While streaming, the args JSON is incomplete. `new_text` is usually the
@@ -738,12 +804,15 @@ class _TextToolBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final meta = <String>[];
-    if (spec.toolName == 'edit_range' && spec.start != null) {
-      meta.add('替换 第 ${spec.start}-${spec.end ?? spec.start} 段');
-    } else if (spec.toolName == 'insert_at' && spec.index != null) {
-      meta.add('插入位置 第 ${spec.index} 段前');
-    } else if (spec.toolName == 'delete_range' && spec.start != null) {
-      meta.add('删除 第 ${spec.start}-${spec.end ?? spec.start} 段');
+    if (spec.toolName == 'edit_range') {
+      meta.add('替换 ${_TextToolSpec.formatRange(spec.start, spec.end,
+          spec.startHash, spec.endHash, spec.startContent, spec.endContent)}');
+    } else if (spec.toolName == 'insert_at') {
+      meta.add('插入位置 ${_TextToolSpec.formatLocator(
+          spec.index, spec.indexHash, spec.indexContent, suffix: '前')}');
+    } else if (spec.toolName == 'delete_range') {
+      meta.add('删除 ${_TextToolSpec.formatRange(spec.start, spec.end,
+          spec.startHash, spec.endHash, spec.startContent, spec.endContent)}');
     }
     if (spec.chapter != null) meta.add('章节 ${spec.chapter}');
 

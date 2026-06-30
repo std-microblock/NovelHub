@@ -24,55 +24,86 @@ class ToolSpecs {
 
   static const LlmTool editRange = LlmTool(
     name: 'edit_range',
-    description: '把第 start..end 段（闭区间，1-based）替换为 new_text。'
+    description: '把某段范围替换为 new_text。段落定位支持三种方式（推荐用 hash）：'
+        'start_hash / end_hash（get_chapter_full_text 每段返回的 hash，'
+        '取其唯一前缀即可，≥4 位）、start_content / end_content（段落文本片段，'
+        '先按整段相等再按子串包含匹配）、start / end（1-based 段号）。'
+        'end 全部省略时默认 = start（替换单段）。'
         '段落分隔规则：仅空行（\\n\\n，即两个换行）才算一段；单个 \\n 是段内软换行，不会新起一段。'
         '例: new_text="第一段\\n\\n第二段" = 两段；new_text="第一行\\n第二行" = 一段（两行同属一段）。'
         '可传 chapter 指定目标章节（默认当前章节）。',
     parametersJsonSchema: {
       'type': 'object',
       'properties': {
-        'start': {'type': 'integer', 'description': '起始段号（含）'},
-        'end': {'type': 'integer', 'description': '结束段号（含）'},
+        'start': {'type': 'integer', 'description': '起始段号（含），1-based。与 start_hash / start_content 三选一。'},
+        'end': {'type': 'integer', 'description': '结束段号（含），1-based。省略=同 start（替换单段）。'},
+        'start_hash': {
+          'type': 'string',
+          'description': '起始段的 hash（get_chapter_full_text 返回，≥4 位唯一前缀）。推荐。',
+        },
+        'end_hash': {'type': 'string', 'description': '结束段的 hash。省略=同 start_hash。'},
+        'start_content': {
+          'type': 'string',
+          'description': '起始段的文本片段（先整段相等再子串包含匹配）。hash 优先于此。',
+        },
+        'end_content': {'type': 'string', 'description': '结束段的文本片段。省略=同 start_content。'},
         'new_text': {
           'type': 'string',
           'description': '替换内容。仅 \\n\\n（空行）分隔为多段；单个 \\n 是段内软换行。',
         },
         'chapter': _chapterParam,
       },
-      'required': ['start', 'end', 'new_text'],
+      'required': ['new_text'],
     },
   );
 
   static const LlmTool deleteRange = LlmTool(
     name: 'delete_range',
-    description: '删除第 start..end 段（闭区间，1-based）。可传 chapter 指定目标章节。',
+    description: '删除某段范围。段落定位同 edit_range：start_hash / start_content / start '
+        '（end 省略=同 start，删单段）。可传 chapter 指定目标章节。',
     parametersJsonSchema: {
       'type': 'object',
       'properties': {
-        'start': {'type': 'integer'},
-        'end': {'type': 'integer'},
+        'start': {'type': 'integer', 'description': '起始段号，1-based。'},
+        'end': {'type': 'integer', 'description': '结束段号，1-based。省略=同 start。'},
+        'start_hash': {'type': 'string', 'description': '起始段的 hash（推荐）。'},
+        'end_hash': {'type': 'string', 'description': '结束段的 hash。省略=同 start_hash。'},
+        'start_content': {'type': 'string', 'description': '起始段的文本片段。'},
+        'end_content': {'type': 'string', 'description': '结束段的文本片段。省略=同 start_content。'},
         'chapter': _chapterParam,
       },
-      'required': ['start', 'end'],
+      'required': [],
     },
   );
 
   static const LlmTool insertAt = LlmTool(
     name: 'insert_at',
-    description: '在第 index 段前插入 new_text。index = 段数+1 时追加到末尾。'
+    description: '在某段前插入 new_text。定位支持 index_hash / index_content / index '
+        '（1-based 段号）；三者全部省略时追加到章节末尾（最常用）。'
         '段落分隔规则：仅空行（\\n\\n，即两个换行）才算一段；单个 \\n 是段内软换行，不会新起一段。'
         '可传 chapter 指定目标章节。',
     parametersJsonSchema: {
       'type': 'object',
       'properties': {
-        'index': {'type': 'integer', 'description': '插入位置（1-based）'},
+        'index': {
+          'type': 'integer',
+          'description': '插入位置（1-based，在该段前插入）。省略=追加到末尾。',
+        },
+        'index_hash': {
+          'type': 'string',
+          'description': '在该 hash 对应段前插入（推荐）。省略 index 类参数即追加末尾。',
+        },
+        'index_content': {
+          'type': 'string',
+          'description': '在该文本片段对应段前插入。省略 index 类参数即追加末尾。',
+        },
         'new_text': {
           'type': 'string',
           'description': '插入内容。仅 \\n\\n（空行）分隔为多段；单个 \\n 是段内软换行。',
         },
         'chapter': _chapterParam,
       },
-      'required': ['index', 'new_text'],
+      'required': ['new_text'],
     },
   );
 

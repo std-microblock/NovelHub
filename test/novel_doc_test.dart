@@ -17,9 +17,39 @@ NovelDoc _docWith(int count, {String chapterId = 'c1'}) {
 }
 
 void main() {
-  test('getFullText numbers paragraphs 1-based', () {
+  test('getFullText prefixes each line with number + display hash', () {
     final doc = _docWith(3);
-    expect(doc.getFullText('c1'), '1 line1\n2 line2\n3 line3');
+    // Each line is "N hash text" where hash is the >=4-char unique prefix of
+    // hashText(text). Verify the shape and that the numbers + texts survive.
+    final out = doc.getFullText('c1');
+    final lines = out.split('\n');
+    expect(lines.length, 3);
+    for (var i = 0; i < lines.length; i++) {
+      final m = RegExp(r'^(\d+) ([0-9a-f]{4,}) (.*)$').firstMatch(lines[i])!;
+      expect(m.group(1), '${i + 1}');
+      expect(m.group(3), 'line${i + 1}');
+      // The displayed hash is a prefix of the full hash of the text.
+      final full = NovelDoc.hashText('line${i + 1}');
+      expect(full.startsWith(m.group(2)!), isTrue);
+    }
+  });
+
+  test('getFullText hashes are unique within a chapter', () {
+    final doc = _docWith(3);
+    final hashes = doc.displayHashes('c1');
+    expect(hashes.length, 3);
+    expect(hashes.toSet().length, 3);
+    for (final h in hashes) {
+      expect(h.length, greaterThanOrEqualTo(4));
+    }
+  });
+
+  test('hashText is stable and 8 hex chars', () {
+    expect(NovelDoc.hashText('hello'), NovelDoc.hashText('hello'));
+    expect(NovelDoc.hashText('hello').length, 8);
+    expect(RegExp(r'^[0-9a-f]{8}$').hasMatch(NovelDoc.hashText('hello')), isTrue);
+    // Different text → different hash.
+    expect(NovelDoc.hashText('hello'), isNot(NovelDoc.hashText('world')));
   });
 
   group('editParagraphs', () {
@@ -128,11 +158,95 @@ void main() {
           chapterId: 'c1', index: 3, newText: 'tail', messageId: 'm1');
       expect(doc.chapterById('c1')!.paragraphs.last.text, 'tail');
     });
+    test('null index appends after the last paragraph', () {
+      final doc = _docWith(2);
+      doc.insertParagraphs(
+          chapterId: 'c1', index: null, newText: 'tail1\n\ntail2', messageId: 'm1');
+      expect(doc.chapterById('c1')!.paragraphs.map((p) => p.text).toList(),
+          ['line1', 'line2', 'tail1', 'tail2']);
+    });
     test('out-of-range throws', () {
       final doc = _docWith(2);
       expect(
           () => doc.insertParagraphs(
               chapterId: 'c1', index: 5, newText: 'x', messageId: 'm1'),
+          throwsA(isA<NovelDocException>()));
+    });
+  });
+
+  group('resolveParagraph', () {
+    test('by number', () {
+      final doc = _docWith(3);
+      expect(doc.resolveParagraph(chapterId: 'c1', number: 2), 2);
+      expect(() => doc.resolveParagraph(chapterId: 'c1', number: 0),
+          throwsA(isA<NovelDocException>()));
+      expect(() => doc.resolveParagraph(chapterId: 'c1', number: 4),
+          throwsA(isA<NovelDocException>()));
+    });
+
+    test('by unique hash prefix', () {
+      final doc = _docWith(3);
+      final hashes = doc.displayHashes('c1');
+      // The hash for paragraph 2 should resolve back to 2.
+      expect(doc.resolveParagraph(chapterId: 'c1', hash: hashes[1]), 2);
+      // A longer prefix of the same hash also works.
+      final full = NovelDoc.hashText('line2');
+      expect(doc.resolveParagraph(chapterId: 'c1', hash: full), 2);
+    });
+
+    test('by content (exact then substring)', () {
+      final doc = _docWith(3);
+      // Exact trimmed equality.
+      expect(doc.resolveParagraph(chapterId: 'c1', content: 'line2'), 2);
+      // Substring containment when not exact.
+      expect(doc.resolveParagraph(chapterId: 'c1', content: 'ine3'), 3);
+    });
+
+    test('ambiguous content throws', () {
+      // line1 / line2 / line3 all contain "line".
+      final doc = _docWith(3);
+      expect(() => doc.resolveParagraph(chapterId: 'c1', content: 'line'),
+          throwsA(isA<NovelDocException>()));
+    });
+
+    test('hash matching multiple paragraphs throws', () {
+      // Two identical paragraphs → same full hash → no unique prefix.
+      final novel = Novel.create(title: 'n');
+      novel.chapters = [
+        Chapter(
+          id: 'c1',
+          title: novel.chapters.first.title,
+          paragraphs: [
+            Paragraph(id: 'p1', text: 'same'),
+            Paragraph(id: 'p2', text: 'same'),
+          ],
+        ),
+      ];
+      final doc = NovelDoc(novel);
+      // displayHashes collapses both to the full 8-char hash (no unique prefix).
+      final h = doc.displayHashes('c1').first;
+      expect(() => doc.resolveParagraph(chapterId: 'c1', hash: h),
+          throwsA(isA<NovelDocException>()));
+    });
+
+    test('hash priority over content and number', () {
+      final doc = _docWith(3);
+      final hashes = doc.displayHashes('c1');
+      // Even with a wrong number, hash wins.
+      expect(doc.resolveParagraph(
+          chapterId: 'c1', hash: hashes[0], number: 3), 1);
+    });
+
+    test('nothing provided returns 0', () {
+      final doc = _docWith(3);
+      expect(doc.resolveParagraph(chapterId: 'c1'), 0);
+    });
+
+    test('unknown hash / content throws', () {
+      final doc = _docWith(3);
+      expect(() => doc.resolveParagraph(chapterId: 'c1', hash: 'zzzzzzzz'),
+          throwsA(isA<NovelDocException>()));
+      expect(() => doc.resolveParagraph(chapterId: 'c1', content: 'nope-nope'),
           throwsA(isA<NovelDocException>()));
     });
   });

@@ -324,4 +324,81 @@ void main() {
     expect(lastUser.content, contains('【选中段落】'));
     expect(lastUser.content, contains('1 foo'));
   });
+
+  test('edit_range resolves paragraphs by hash', () async {
+    final novel = Novel.create(title: 't');
+    novel.chapters = [
+      Chapter(id: 'c1', title: novel.chapters.first.title, paragraphs: [
+        Paragraph(id: 'p1', text: 'one'),
+        Paragraph(id: 'p2', text: 'two'),
+        Paragraph(id: 'p3', text: 'three'),
+      ]),
+    ];
+    final doc = NovelDoc(novel);
+    // Use the display hash of paragraph 2 ("two") to target it.
+    final hash = doc.displayHashes('c1')[1];
+
+    final client = _ScriptedClient([
+      LlmResponse(content: '', toolCalls: [
+        ToolCall(
+          id: 'call_1',
+          name: 'edit_range',
+          arguments: '{"start_hash":"$hash","new_text":"TWO"}',
+        ),
+      ]),
+      const LlmResponse(content: '已修改。'),
+    ], _cfg());
+
+    final loop = AgentLoop(client: client);
+    await loop.run(
+      novel: novel,
+      novelDoc: doc,
+      chapterId: 'c1',
+      chapterTitle: novel.chapters.first.title,
+      history: const [],
+      userMessage: Message.user('把two那段改成TWO'),
+      now: 1,
+      onTurnUpdate: (_) {},
+    );
+
+    // Only paragraph 2 changed; neighbors untouched.
+    final paras = doc.chapterById('c1')!.paragraphs;
+    expect(paras.map((p) => p.text).toList(), ['one', 'TWO', 'three']);
+  });
+
+  test('insert_at with no locator appends to the end', () async {
+    final novel = Novel.create(title: 't');
+    novel.chapters = [
+      Chapter(id: 'c1', title: novel.chapters.first.title, paragraphs: [
+        Paragraph(id: 'p1', text: 'one'),
+      ]),
+    ];
+    final doc = NovelDoc(novel);
+
+    final client = _ScriptedClient([
+      LlmResponse(content: '', toolCalls: [
+        ToolCall(
+          id: 'call_1',
+          name: 'insert_at',
+          arguments: '{"new_text":"two\\n\\nthree"}',
+        ),
+      ]),
+      const LlmResponse(content: '已追加。'),
+    ], _cfg());
+
+    final loop = AgentLoop(client: client);
+    await loop.run(
+      novel: novel,
+      novelDoc: doc,
+      chapterId: 'c1',
+      chapterTitle: novel.chapters.first.title,
+      history: const [],
+      userMessage: Message.user('在末尾追加两段'),
+      now: 1,
+      onTurnUpdate: (_) {},
+    );
+
+    expect(doc.chapterById('c1')!.paragraphs.map((p) => p.text).toList(),
+        ['one', 'two', 'three']);
+  });
 }
