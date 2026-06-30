@@ -12,6 +12,9 @@ import 'message_tile.dart';
 import 'ref_badge.dart';
 import 'rich_text_controller.dart';
 
+/// Outcome the user can pick from a revert confirmation dialog.
+enum RevertChoice { cancel, keepDoc, full }
+
 /// Lower pane: a resizable conversation panel + a redesigned input composer.
 /// Errors surface inline; the composer's left button opens a model switcher;
 /// Enter / Ctrl+Enter send behavior is configurable in settings.
@@ -350,8 +353,17 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
                                   createdAt: 0),
                             );
                             if (lastUser.id.isNotEmpty) {
-                              notifier.loadMessageForEdit(lastUser.id);
-                              _send();
+                              _confirmRevert(
+                                context,
+                                lastUser.turnId,
+                                title: '重试确认',
+                                actionLabel: '全部撤回并重试',
+                                onConfirm: (keepDoc) {
+                                  notifier.loadMessageForEdit(lastUser.id,
+                                      keepDoc: keepDoc);
+                                  _send();
+                                },
+                              );
                             }
                           },
                   ),
@@ -457,6 +469,129 @@ class _AgentPaneState extends ConsumerState<AgentPane> {
       if (ok == true) notifier.clearContext();
     });
   }
+
+  /// Confirm a revert-style action (edit / retry / delete / revert). Shows the
+  /// concrete document mutations that would be undone and lets the user pick:
+  /// cancel (do nothing), keep the doc (only remove the conversation messages),
+  /// or fully revert (undo the listed mutations + remove the messages). The
+  /// chosen [RevertChoice] is forwarded to [onConfirm].
+  void _confirmRevert(
+    BuildContext context,
+    String turnId, {
+    required String title,
+    required String actionLabel,
+    required void Function(bool keepDoc) onConfirm,
+  }) {
+    final notifier = ref.read(editorStateProvider.notifier);
+    final changes = notifier.previewTurnRevert(turnId);
+    showRevertConfirm(
+      context: context,
+      changes: changes,
+      title: title,
+      actionLabel: actionLabel,
+      onConfirm: onConfirm,
+    );
+  }
+}
+
+/// Top-level revert confirmation dialog: shows the concrete document mutations
+/// a revert would undo and lets the user pick cancel / keep-doc / full revert.
+/// Used by both the error-retry button and the per-turn action chips.
+void showRevertConfirm({
+  required BuildContext context,
+  required List<String> changes,
+  required String title,
+  required String actionLabel,
+  required void Function(bool keepDoc) onConfirm,
+}) {
+  showDialog<RevertChoice>(
+    context: context,
+    builder: (ctx) {
+      final scheme = Theme.of(ctx).colorScheme;
+      return AlertDialog(
+        title: Text(title),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('此操作将移除该轮对话及其之后的所有轮次。',
+                    style: TextStyle(fontSize: 13)),
+                const SizedBox(height: 10),
+                Text('将影响的文档改动：',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w500)),
+                const SizedBox(height: 4),
+                if (changes.isEmpty)
+                  Text('无文档改动（仅删除对话消息）',
+                      style: TextStyle(
+                          fontSize: 12, color: scheme.onSurfaceVariant))
+                else
+                  Container(
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 6),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final c in changes)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 1),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('• ',
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: scheme.onSurfaceVariant)),
+                                Expanded(
+                                  child: Text(c,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: scheme.onSurface)),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 10),
+                Text(
+                    '「全部撤回」= 撤销上述改动并删除对话；'
+                    '「只删会话，留文档」= 保留已写入文本，仅删除对话。',
+                    style: TextStyle(
+                        fontSize: 11, color: scheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, RevertChoice.cancel),
+              child: const Text('取消')),
+          OutlinedButton(
+            onPressed: () => Navigator.pop(ctx, RevertChoice.keepDoc),
+            child: const Text('只删会话，留文档'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, RevertChoice.full),
+            child: Text(actionLabel),
+          ),
+        ],
+      );
+    },
+  ).then((choice) {
+    if (choice == RevertChoice.cancel || choice == null) return;
+    onConfirm(choice == RevertChoice.keepDoc);
+  });
 }
 
 /// The rounded input composer. Left button = model switcher; right = send.
@@ -729,13 +864,33 @@ class _TurnList extends ConsumerWidget {
         final turnId = order[i];
         final msgs = byTurn[turnId]!;
         final thisTurnStreaming = isStreaming && turnId == streamingTurnId;
+        // Revert-style actions get a confirmation dialog listing the concrete
+        // document changes they would undo, with a "keep doc" option.
+        void confirm(
+          String title,
+          String actionLabel,
+          void Function(bool keepDoc) onConfirm,
+        ) {
+          showRevertConfirm(
+            context: context,
+            changes: notifier.previewTurnRevert(turnId),
+            title: title,
+            actionLabel: actionLabel,
+            onConfirm: onConfirm,
+          );
+        }
+
         return _TurnCluster(
           messages: msgs,
           streaming: thisTurnStreaming,
-          onRetry: () => notifier.retryTurn(turnId),
-          onDelete: () => notifier.deleteTurn(turnId),
-          onRevert: () => notifier.revertTurn(turnId),
-          onEdit: () => notifier.editTurn(turnId),
+          onRetry: () => confirm('重试确认', '全部撤回并重试',
+              (keepDoc) => notifier.retryTurn(turnId, keepDoc: keepDoc)),
+          onDelete: () => confirm('删除确认', '全部撤回并删除',
+              (keepDoc) => notifier.deleteTurn(turnId, keepDoc: keepDoc)),
+          onRevert: () => confirm('撤回确认', '全部撤回',
+              (keepDoc) => notifier.revertTurn(turnId, keepDoc: keepDoc)),
+          onEdit: () => confirm('编辑确认', '全部撤回并编辑',
+              (keepDoc) => notifier.editTurn(turnId, keepDoc: keepDoc)),
         );
       },
     );

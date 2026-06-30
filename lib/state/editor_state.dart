@@ -449,14 +449,23 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   /// remove this message and everything after it from the conversation, and
   /// load its content into the draft box (badges preserved, since content
   /// carries the inline tokens).
-  void loadMessageForEdit(String messageId) {
+  ///
+  /// When [keepDoc] is true the document changes are NOT undone — only the
+  /// events are dropped so they can't be reverted later, and the conversation
+  /// messages are removed. Used by the "only remove the conversation, keep
+  /// the doc" revert option.
+  void loadMessageForEdit(String messageId, {bool keepDoc = false}) {
     final msg = state.conversation.messages.firstWhere(
       (m) => m.id == messageId,
       orElse: () =>
           Message(id: '', role: MessageRole.user, turnId: '', createdAt: 0),
     );
     if (msg.id.isEmpty) return;
-    state.timeline.revertTo(messageId, includeMessage: true);
+    if (keepDoc) {
+      state.timeline.dropEventsFromMessage(messageId, includeMessage: true);
+    } else {
+      state.timeline.revertTo(messageId, includeMessage: true);
+    }
     final msgs = state.conversation.messages;
     final idx = msgs.indexWhere((m) => m.id == messageId);
     if (idx >= 0) msgs.removeRange(idx, msgs.length);
@@ -477,13 +486,9 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
         ? text.trim()
         : state.draftContent;
 
-    final editingId = state.editingMessageId;
-    if (editingId != null) {
-      state.timeline.revertTo(editingId, includeMessage: true);
-      final msgs = state.conversation.messages;
-      final idx = msgs.indexWhere((m) => m.id == editingId);
-      if (idx >= 0) msgs.removeRange(idx, msgs.length);
-    }
+    // loadMessageForEdit already reverted (or dropped, per keepDoc) the
+    // editing message's events and trimmed the conversation, so there's
+    // nothing to re-revert here. editingMessageId is cleared below on send.
 
     // Nothing to send? (empty text and no tokens)
     if (content.trim().isEmpty) return;
@@ -643,18 +648,47 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
 
   // --- turn-level actions (applied to a whole turn: user msg + its replies) ---
 
-  /// Delete an entire turn (the user message and all its assistant/tool
-  /// replies), undoing any document mutations the turn produced.
-  void deleteTurn(String turnId) {
+  /// The user-message id of a turn (events are tagged with this id), or null
+  /// if the turn has no user message.
+  String? _turnUserMessageId(String turnId) {
+    final m = state.conversation.messages.firstWhere(
+      (m) => m.turnId == turnId && m.role == MessageRole.user,
+      orElse: () =>
+          Message(id: '', role: MessageRole.user, turnId: '', createdAt: 0),
+    );
+    return m.id.isEmpty ? null : m.id;
+  }
+
+  /// Human-readable list of the document mutations that reverting [turnId]
+  /// would undo (newest first), for the confirmation dialog. Empty when the
+  /// turn (and any turns after it) made no document changes.
+  List<String> previewTurnRevert(String turnId) {
+    final id = _turnUserMessageId(turnId);
+    if (id == null) return const [];
+    final events =
+        state.timeline.previewRevert(id, includeMessage: true);
+    return events.map((e) => state.novelDoc.describeMutation(e)).toList();
+  }
+
+  /// Delete/revert an entire turn: undo its document mutations (and those of
+  /// every turn recorded after it) and remove this turn's messages and all
+  /// later turns' messages from the conversation. When [keepDoc] is true the
+  /// document changes are NOT undone — only the reversibility events are
+  /// dropped, so the conversation is trimmed but the written text stays.
+  void deleteTurn(String turnId, {bool keepDoc = false}) {
     if (state.agentRunning) return;
-    // Undo mutations from every message in this turn, newest first.
-    final turnMsgs =
-        state.conversation.messages.where((m) => m.turnId == turnId).toList();
-    for (final m in turnMsgs.reversed) {
-      state.timeline.revertTo(m.id, includeMessage: true);
+    final id = _turnUserMessageId(turnId);
+    if (id == null) return;
+    if (keepDoc) {
+      state.timeline.dropEventsFromMessage(id, includeMessage: true);
+    } else {
+      state.timeline.revertTo(id, includeMessage: true);
     }
-    state.conversation.messages
-        .removeWhere((m) => m.turnId == turnId);
+    // Remove this turn and everything after it (their doc changes were
+    // already reverted/dropped above), keeping earlier turns intact.
+    final msgs = state.conversation.messages;
+    final idx = msgs.indexWhere((m) => m.turnId == turnId);
+    if (idx >= 0) msgs.removeRange(idx, msgs.length);
     _bump();
     persistNovel();
   }
@@ -662,12 +696,14 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   /// Revert (without resending) to the state just before a turn: undo that
   /// turn's mutations and drop the turn's user message + replies. Equivalent
   /// to "撤回" this turn.
-  void revertTurn(String turnId) => deleteTurn(turnId);
+  void revertTurn(String turnId, {bool keepDoc = false}) =>
+      deleteTurn(turnId, keepDoc: keepDoc);
 
   /// Retry a turn: undo that turn's mutations, drop the turn, then resend the
   /// (edited) user content as a fresh turn. If [newContent] is null, reuse the
   /// original user message content.
-  Future<void> retryTurn(String turnId, {String? newContent}) async {
+  Future<void> retryTurn(String turnId,
+      {String? newContent, bool keepDoc = false}) async {
     if (state.agentRunning) return;
     final userMsg = state.conversation.messages.firstWhere(
       (m) => m.turnId == turnId && m.role == MessageRole.user,
@@ -677,7 +713,7 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
     if (userMsg.id.isEmpty) return;
     final content = newContent ?? userMsg.content;
     // Undo + drop the whole turn.
-    deleteTurn(turnId);
+    deleteTurn(turnId, keepDoc: keepDoc);
     // Reload the content into the draft (rich-text preserved) and send.
     state = state.copyWith(draftContent: content);
     await send('');
@@ -685,14 +721,14 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
 
   /// Load a turn's user message into the input box for editing (revert +
   /// resend happens on send).
-  void editTurn(String turnId) {
+  void editTurn(String turnId, {bool keepDoc = false}) {
     final userMsg = state.conversation.messages.firstWhere(
       (m) => m.turnId == turnId && m.role == MessageRole.user,
       orElse: () =>
           Message(id: '', role: MessageRole.user, turnId: '', createdAt: 0),
     );
     if (userMsg.id.isEmpty) return;
-    loadMessageForEdit(userMsg.id);
+    loadMessageForEdit(userMsg.id, keepDoc: keepDoc);
   }
 
   /// Clear the conversation context but keep the document as-is. The agent

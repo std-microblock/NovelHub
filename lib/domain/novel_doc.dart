@@ -446,4 +446,61 @@ class NovelDoc {
     final blocks = text.split('\n\n');
     return blocks.map((l) => Paragraph.create(l)).toList();
   }
+
+  /// A short human-readable description of what [ev] did, used to preview
+  /// what a revert would undo before the user commits to it. Includes the
+  /// target chapter's title, the affected 1-based range, before/after counts,
+  /// and a short snippet of the removed text.
+  String describeMutation(NovelMutation ev) {
+    String title() {
+      final id = ev.chapterId;
+      final ch = id == null ? null : chapterById(id);
+      return ch == null ? '章节' : '《${ch.title}》';
+    }
+
+    String snippet() {
+      if (ev.removed.isEmpty) return '';
+      final first = ev.removed.first.text.trim();
+      if (first.isEmpty) return '';
+      return first.length > 30 ? '${first.substring(0, 30)}…' : first;
+    }
+
+    String range() {
+      if (ev.kind == NovelMutationKind.deleteParagraphs) {
+        // deleteParagraphs records end = start - 1 (empty range); show the
+        // single start instead.
+        return '第 ${ev.start} 段';
+      }
+      return ev.start == ev.end ? '第 ${ev.start} 段' : '第 ${ev.start}-${ev.end} 段';
+    }
+
+    switch (ev.kind) {
+      case NovelMutationKind.editParagraphs:
+        final before = ev.removed.length;
+        final after = ev.inserted.length;
+        final snip = snippet();
+        return '修改 ${title()} ${range()}'
+            '（$before 段→$after 段）'
+            '${snip.isNotEmpty ? '："$snip"' : ''}';
+      case NovelMutationKind.deleteParagraphs:
+        final before = ev.removed.length;
+        final snip = snippet();
+        return '删除 ${title()} ${range()}'
+            '（$before 段）'
+            '${snip.isNotEmpty ? '："$snip"' : ''}';
+      case NovelMutationKind.insertParagraphs:
+        final n = ev.inserted.length;
+        return '插入 $n 段于 ${title()} 第 ${ev.start} 段前';
+      case NovelMutationKind.addChapter:
+        final ch = ev.chapterId == null ? null : chapterById(ev.chapterId!);
+        return '新增章节${ch == null ? '' : '《${ch.title}》'}';
+      case NovelMutationKind.deleteChapter:
+        final ch = ev.removedChapter;
+        return '删除章节${ch == null ? '' : '《${ch.title}》'}';
+      case NovelMutationKind.renameChapter:
+        return '重命名章节${title()}（原「${ev.oldTitle ?? ''}」）';
+      case NovelMutationKind.moveChapter:
+        return '移动章节${title()} 顺序';
+    }
+  }
 }

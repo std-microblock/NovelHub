@@ -121,4 +121,62 @@ void main() {
     expect(doc.novel.chapters.first.id, 'c1');
     expect(_texts(doc), ['line1', 'line2']);
   });
+
+  group('turn-scoped revert', () {
+    test('includeMessage does not nuke earlier turns', () {
+      // Regression: an earlier implementation reverted every event from the
+      // target onwards (including earlier turns), so undoing the last turn
+      // wiped the whole document history. revertTo(m1, includeMessage:true)
+      // must only touch m1 (and any turns after it), never m0.
+      final doc = _docWith(3);
+      final timeline = Timeline(doc);
+      doc.editParagraphs(chapterId: 'c1', start: 1, end: 1, newText: 'A', messageId: 'm0');
+      doc.editParagraphs(chapterId: 'c1', start: 2, end: 2, newText: 'B', messageId: 'm1');
+      expect(_texts(doc), ['A', 'B', 'line3']);
+      timeline.revertTo('m1', includeMessage: true);
+      // m1 undone, m0 preserved.
+      expect(_texts(doc), ['A', 'line2', 'line3']);
+    });
+
+    test('includeMessage undoes target + later turns but not earlier', () {
+      final doc = _docWith(4);
+      final timeline = Timeline(doc);
+      doc.editParagraphs(chapterId: 'c1', start: 1, end: 1, newText: 'A', messageId: 'm0');
+      doc.editParagraphs(chapterId: 'c1', start: 2, end: 2, newText: 'B', messageId: 'm1');
+      doc.editParagraphs(chapterId: 'c1', start: 3, end: 3, newText: 'C', messageId: 'm2');
+      expect(_texts(doc), ['A', 'B', 'C', 'line4']);
+      timeline.revertTo('m1', includeMessage: true);
+      // m1 + m2 undone, m0 preserved.
+      expect(_texts(doc), ['A', 'line2', 'line3', 'line4']);
+    });
+  });
+
+  group('preview / keep-doc', () {
+    test('previewRevert mirrors revertTo without applying', () {
+      final doc = _docWith(3);
+      final timeline = Timeline(doc);
+      doc.editParagraphs(chapterId: 'c1', start: 1, end: 1, newText: 'A', messageId: 'm1');
+      doc.editParagraphs(chapterId: 'c1', start: 2, end: 2, newText: 'B', messageId: 'm2');
+      final preview = timeline.previewRevert('m1', includeMessage: true);
+      // Should target m1 + m2 (two events), in newest-first order.
+      expect(preview.length, 2);
+      expect(preview.map((e) => e.messageId).toList(), ['m2', 'm1']);
+      // Doc untouched.
+      expect(_texts(doc), ['A', 'B', 'line3']);
+    });
+
+    test('dropEventsFromMessage keeps the doc, forgets reversibility', () {
+      final doc = _docWith(2);
+      final timeline = Timeline(doc);
+      doc.editParagraphs(chapterId: 'c1', start: 1, end: 1, newText: 'A', messageId: 'm1');
+      expect(_texts(doc), ['A', 'line2']);
+      final dropped = timeline.dropEventsFromMessage('m1', includeMessage: true);
+      expect(dropped, 1);
+      // Doc unchanged.
+      expect(_texts(doc), ['A', 'line2']);
+      // Events gone → a subsequent revertTo(m1) is a no-op.
+      expect(timeline.revertTo('m1', includeMessage: true), 0);
+      expect(_texts(doc), ['A', 'line2']);
+    });
+  });
 }
