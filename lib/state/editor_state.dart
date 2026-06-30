@@ -241,6 +241,55 @@ class EditorStateNotifier extends StateNotifier<EditorState> {
   void clearSelection() =>
       state = state.copyWith(selectedParagraphIds: {});
 
+  // --- selection actions (select-mode toolbar) ---
+
+  /// Joined text of the currently-selected paragraphs (in document order),
+  /// or '' if nothing is selected. Backs the copy-to-clipboard action.
+  String selectedParagraphsText() {
+    final sel = state.selectedParagraphIds;
+    if (sel.isEmpty) return '';
+    return state.chapter.paragraphs
+        .where((p) => sel.contains(p.id))
+        .map((p) => p.text)
+        .join('\n\n');
+  }
+
+  /// Delete every currently-selected paragraph, clear the selection, persist.
+  Future<void> deleteSelectedParagraphs() async {
+    final sel = state.selectedParagraphIds;
+    if (sel.isEmpty) return;
+    state.chapter.paragraphs.removeWhere((p) => sel.contains(p.id));
+    state = state.copyWith(selectedParagraphIds: {});
+    _bump();
+    await persistNovel();
+  }
+
+  /// Replace the selected paragraphs with [newText] (split on `\n\n` into new
+  /// paragraphs), inserting them at the first selected paragraph's position so
+  /// document order is preserved for the common contiguous-range case. Clears
+  /// the selection and persists. Backs the "modify" toolbar action.
+  Future<void> replaceSelectedParagraphs(String newText) async {
+    final sel = state.selectedParagraphIds;
+    if (sel.isEmpty) return;
+    final paras = state.chapter.paragraphs;
+    final indices = <int>[];
+    for (var i = 0; i < paras.length; i++) {
+      if (sel.contains(paras[i].id)) indices.add(i);
+    }
+    if (indices.isEmpty) return;
+    final firstIdx = indices.first;
+    final newParas =
+        newText.split('\n\n').map((t) => Paragraph.create(t)).toList();
+    // Remove selected back-to-front so earlier indices stay valid.
+    for (var i = indices.length - 1; i >= 0; i--) {
+      paras.removeAt(indices[i]);
+    }
+    paras.insertAll(firstIdx, newParas);
+    state = state.copyWith(selectedParagraphIds: {});
+    _bump();
+    await persistNovel();
+  }
+
   // --- chapter structure (manual, UI-driven) ---
 
   /// Append a new chapter and switch to it. Mirrors the agent's `add_chapter`

@@ -12,9 +12,12 @@ Future<String?> promptString(
   String? hint,
   String? initial,
   String confirmLabel = '确定',
+  int? minLines,
+  int? maxLines,
+  bool selectAll = true,
 }) async {
   final ctrl = TextEditingController(text: initial ?? '');
-  if (initial != null && initial.isNotEmpty) {
+  if (selectAll && initial != null && initial.isNotEmpty) {
     ctrl.selection =
         TextSelection(baseOffset: 0, extentOffset: initial.length);
   }
@@ -25,6 +28,8 @@ Future<String?> promptString(
       content: TextField(
         controller: ctrl,
         autofocus: true,
+        minLines: minLines,
+        maxLines: maxLines,
         decoration: InputDecoration(hintText: hint),
       ),
       actions: [

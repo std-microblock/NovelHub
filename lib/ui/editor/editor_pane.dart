@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/entities.dart' show Paragraph;
 import '../../state/editor_state.dart';
 import '../../state/providers.dart' show editorStateProvider;
+import 'prompt_string.dart';
 
 /// Upper pane: dual-mode editor.
 ///  - Edit mode: a single multiline text field. Paragraphs are split on
@@ -79,40 +81,117 @@ class _EditorPaneState extends ConsumerState<EditorPane> {
     final paragraphs = editor.chapter.paragraphs;
 
     if (isEdit) {
-      return Padding(
-        padding: EdgeInsets.fromLTRB(16, 8, 16, 8 + widget.bottomInset),
-        child: TextField(
-          controller: _ctrl,
-          scrollController: _scroll,
-          autofocus: true,
-          minLines: null,
-          maxLines: null,
-          expands: true,
-          textAlignVertical: TextAlignVertical.top,
-          decoration: const InputDecoration(
-            border: InputBorder.none,
-            hintText: '开始写作…（按两次回车分段）',
+      return Column(
+        children: [
+          _StatsBar(paragraphs: paragraphs),
+          Expanded(
+            child: Padding(
+              padding:
+                  EdgeInsets.fromLTRB(16, 8, 16, 8 + widget.bottomInset),
+              child: TextField(
+                controller: _ctrl,
+                scrollController: _scroll,
+                autofocus: true,
+                minLines: null,
+                maxLines: null,
+                expands: true,
+                textAlignVertical: TextAlignVertical.top,
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  hintText: '开始写作…（按两次回车分段）',
+                ),
+                style: Theme.of(context).textTheme.bodyLarge,
+                onChanged: (v) {
+                  _editing = true;
+                  notifier.setChapterBody(v);
+                },
+              ),
+            ),
           ),
-          style: Theme.of(context).textTheme.bodyLarge,
-          onChanged: (v) {
-            _editing = true;
-            notifier.setChapterBody(v);
-          },
-        ),
+        ],
       );
     }
 
     // Select mode: numbered, tappable paragraph blocks.
+    Widget body;
     if (paragraphs.isEmpty) {
-      return const Center(child: Text('（空章节，切换到编辑模式开始写作）'));
+      body = const Center(child: Text('（空章节，切换到编辑模式开始写作）'));
+    } else {
+      body = _ParagraphSelectList(
+        paragraphs: paragraphs,
+        selectedIds: editor.selectedParagraphIds,
+        onToggle: notifier.toggleParagraphSelection,
+        onSelectRange: notifier.selectParagraphRange,
+        bottomInset: widget.bottomInset,
+      );
     }
-    return _ParagraphSelectList(
-      paragraphs: paragraphs,
-      selectedIds: editor.selectedParagraphIds,
-      onToggle: notifier.toggleParagraphSelection,
-      onSelectRange: notifier.selectParagraphRange,
-      bottomInset: widget.bottomInset,
+
+    // Floating contextual toolbar over the list, shown only while there is a
+    // selection. Sits above the agent panel in portrait (bottomInset).
+    final hasSelection = editor.selectedParagraphIds.isNotEmpty;
+    return Column(
+      children: [
+        _StatsBar(paragraphs: paragraphs),
+        Expanded(
+          child: Stack(
+            children: [
+              Positioned.fill(child: body),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 12 + widget.bottomInset,
+                child: IgnorePointer(
+                  ignoring: !hasSelection,
+                  child: AnimatedOpacity(
+                    opacity: hasSelection ? 1 : 0,
+                    duration: const Duration(milliseconds: 150),
+                    child: AnimatedSlide(
+                      offset:
+                          hasSelection ? Offset.zero : const Offset(0, 0.3),
+                      duration: const Duration(milliseconds: 150),
+                      child: _SelectionToolbar(
+                        onDelete: notifier.deleteSelectedParagraphs,
+                        onModify: () => _modifySelection(notifier),
+                        onCopy: () => _copySelection(notifier),
+                        onClear: notifier.clearSelection,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
+  }
+
+  Future<void> _copySelection(EditorStateNotifier notifier) async {
+    final text = notifier.selectedParagraphsText();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已复制到剪贴板'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<void> _modifySelection(EditorStateNotifier notifier) async {
+    final initial = notifier.selectedParagraphsText();
+    if (initial.isEmpty) return;
+    final result = await promptString(
+      context,
+      title: '修改选中段落',
+      initial: initial,
+      confirmLabel: '保存',
+      minLines: 6,
+      maxLines: null,
+      selectAll: false,
+    );
+    if (result != null) await notifier.replaceSelectedParagraphs(result);
   }
 }
 
@@ -331,6 +410,146 @@ class _ParagraphSelectListState extends State<_ParagraphSelectList> {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+// --- editor stats bar + select-mode toolbar ---
+
+/// Whitespace run, stripped before counting characters (字数 counts content
+/// characters, not spaces / newlines).
+final RegExp _whitespace = RegExp(r'\s');
+
+/// Assumed silent-reading speed (字/分钟) for the reading-time estimate.
+const int _charsPerMinute = 400;
+
+/// Slim readout pinned above the editor: total characters, estimated reading
+/// time, and paragraph count. Recomputed on every build from [paragraphs].
+class _StatsBar extends StatelessWidget {
+  final List<Paragraph> paragraphs;
+  const _StatsBar({required this.paragraphs});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final charCount = paragraphs.fold<int>(
+        0, (s, p) => s + p.text.replaceAll(_whitespace, '').length);
+    final minutes = (charCount / _charsPerMinute).ceil();
+    final reading = minutes <= 0 ? '0 分钟' : '约 $minutes 分钟';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          _Stat(icon: Icons.text_fields, label: '$charCount 字'),
+          _vDivider(theme),
+          _Stat(icon: Icons.schedule, label: reading),
+          _vDivider(theme),
+          _Stat(
+              icon: Icons.format_list_bulleted,
+              label: '${paragraphs.length} 段'),
+        ],
+      ),
+    );
+  }
+
+  Widget _vDivider(ThemeData theme) => Container(
+        width: 1,
+        height: 12,
+        margin: const EdgeInsets.symmetric(horizontal: 10),
+        color: theme.colorScheme.outlineVariant,
+      );
+}
+
+class _Stat extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _Stat({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: color),
+        ),
+      ],
+    );
+  }
+}
+
+/// Floating contextual toolbar shown in select mode while paragraphs are
+/// selected: delete / modify / copy the selection, plus a clear button.
+class _SelectionToolbar extends StatelessWidget {
+  final VoidCallback onDelete;
+  final VoidCallback onModify;
+  final VoidCallback onCopy;
+  final VoidCallback onClear;
+  const _SelectionToolbar({
+    required this.onDelete,
+    required this.onModify,
+    required this.onCopy,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Material(
+        elevation: 6,
+        borderRadius: BorderRadius.circular(24),
+        color: theme.colorScheme.surfaceContainerHigh,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: '删除选中段落',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: onDelete,
+              ),
+              IconButton(
+                tooltip: '修改选中段落',
+                icon: const Icon(Icons.edit_note),
+                onPressed: onModify,
+              ),
+              IconButton(
+                tooltip: '复制到剪贴板',
+                icon: const Icon(Icons.content_copy),
+                onPressed: onCopy,
+              ),
+              Container(
+                width: 1,
+                height: 20,
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                color: theme.dividerColor,
+              ),
+              IconButton(
+                tooltip: '取消选择',
+                icon: const Icon(Icons.close),
+                onPressed: onClear,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
