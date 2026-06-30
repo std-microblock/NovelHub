@@ -563,12 +563,6 @@ void showRevertConfirm({
                       ],
                     ),
                   ),
-                const SizedBox(height: 10),
-                Text(
-                    '「全部撤回」= 撤销上述改动并删除对话；'
-                    '「只删会话，留文档」= 保留已写入文本，仅删除对话。',
-                    style: TextStyle(
-                        fontSize: 11, color: scheme.onSurfaceVariant)),
               ],
             ),
           ),
@@ -579,7 +573,7 @@ void showRevertConfirm({
               child: const Text('取消')),
           OutlinedButton(
             onPressed: () => Navigator.pop(ctx, RevertChoice.keepDoc),
-            child: const Text('只删会话，留文档'),
+            child: const Text('仅删除会话，保留文档'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, RevertChoice.full),
